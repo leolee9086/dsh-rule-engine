@@ -1,0 +1,17 @@
+{
+  "name": "@leolee9086/dsh-rule-engine",
+  "version": "0.1.0",
+  "description": "DSH 专用的规则引擎：输入规则集与上下文，输出该做什么。核心是纯函数，不依赖 DSH。",
+  "type": "module",
+  "main": "lib/index.js",
+  "exports": {
+    ".": "./lib/index.js",
+    "./package.json": "./package.json"
+  },
+  "files": ["lib", "README.md", "LICENSE"],
+  "license": "AGPL-3.0-or-later",
+  "publishConfig": { "access": "public" },
+  "repository": { "type": "git", "url": "git+https://github.com/leolee9086/dsh-rule-engine.git" },
+  "keywords": ["dsh", "deepseek-harness", "rule-engine", "regex", "prefix-cache"],
+  "scripts": { "test": "node --test" }
+}
