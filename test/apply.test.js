@@ -107,3 +107,34 @@ test('入参形状不对时抛错，不悄悄按空处理', () => {
   assert.throws(() => applyRules({ rules: list, surface: { placement: 'reasoning' } }), /surface.text must be a string/)
   assert.throws(() => applyRules({ rules: list, surface: surface('foo'), gate: 'nope' }), TypeError)
 })
+
+test('同一条规则连续两次：只有第一次废缓存', () => {
+  // 缓存只跟上一次比。规则稳定地改同一个位置时，上一次发出去的就已经是改过的文本，
+  // 前缀自然对得上 —— 所以第二次开始不该再花缓存。
+  const raw = 'AAAA' + 'BBBB' + 'CCCC'
+  const list = rules([transformRule({
+    id: 'r', when: { findRegex: '/BBBB/', replaceString: 'bbbb' }, budget: { maxCacheLoss: 1 },
+  })])
+  const first = applyRules({ rules: list, surface: surface(raw), previous: raw })
+  assert.equal(first.text, 'AAAAbbbbCCCC')
+  assert.equal(first.hits[0].loss, 8 / 12)
+
+  const second = applyRules({ rules: list, surface: surface(raw), previous: first.text })
+  assert.equal(second.text, 'AAAAbbbbCCCC')
+  assert.equal(second.hits[0].loss, 0)
+})
+
+test('loss 只跟修改位置有关：越靠前越贵', () => {
+  const raw = 'AAAABBBBCCCC'
+  const lossAt = (findRegex, replaceString) => applyRules({
+    rules: rules([transformRule({ id: 'r', when: { findRegex, replaceString }, budget: { maxCacheLoss: 1 } })]),
+    surface: surface(raw),
+    previous: raw,
+  }).hits[0].loss
+  // 改第 1 个字符：它后面全废。
+  assert.equal(lossAt('/^A/', 'x'), 1)
+  // 改最后 1 个字符：只废 1 字节。
+  assert.equal(lossAt('/C$/', 'x'), 1 / 12)
+  // 改中间：废掉它之后的。
+  assert.equal(lossAt('/BBBB/', 'bbbb'), 8 / 12)
+})
