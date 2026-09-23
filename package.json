@@ -1,6 +1,6 @@
 {
   "name": "@leolee9086/dsh-rule-engine",
-  "version": "0.1.0",
+  "version": "0.1.1",
   "description": "DSH 专用的规则引擎：输入规则集与上下文，输出该做什么。核心是纯函数，不依赖 DSH。",
   "type": "module",
   "main": "lib/index.js",

@@ -109,6 +109,6 @@ test('sortRules 不改动入参', () => {
 })
 
 test('placement 常量齐全', () => {
-  assert.deepEqual(Object.values(PLACEMENT), ['user', 'assistant', 'reasoning', 'tool-call', 'tool-result'])
+  assert.deepEqual(Object.values(PLACEMENT), ['user', 'assistant', 'reasoning', 'tool-call', 'tool-result', 'request'])
   assert.deepEqual([...ACTION_KINDS], ['notify', 'transform'])
 })

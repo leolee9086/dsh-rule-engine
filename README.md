@@ -63,7 +63,8 @@ result.delivered // 实际收到动作的消费者
 }
 ```
 
-位置一共五个：`user` / `assistant` / `reasoning` / `tool-call` / `tool-result`。
+位置一共六个：`user` / `assistant` / `reasoning` / `tool-call` / `tool-result` / `request`。
+`request` 是组装好的整段请求体 —— 只有请求层看得见它，所以只有提供 `requestRewrite` 服务的插件用得上。
 
 ## 优先级必须显式写出来
 
