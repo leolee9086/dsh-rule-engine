@@ -153,14 +153,20 @@ test('numbers：多个指标是 AND，同一指标给多个比较符也是 AND',
   assert.equal(matchRule(band, surface(), { fatigue: 70 }).reason, 'numbers')
 })
 
-test('numbers：ctx 里没有这个指标就抛错，不给默认值', () => {
+test('numbers：键不在 ctx 里就抛错，但键在、值是 null 时不命中', () => {
   const r = rule({ when: { numbers: { fatigue: { gte: 60 } } } })
-  // 静默当成 0 或 false 的话，规则会「看起来在生效、其实一直没跑」——
-  // 引擎宁可在这里炸掉。null / NaN / 非数字一样抛。
+  // 键根本没有 —— 规则写了个没人会填的指标，或调用方漏填，属于配置问题：
+  // 静默当成 false 的话规则会「看起来在生效、其实一直没跑」，引擎宁可在这里炸掉。
   assert.throws(() => matchRule(r, surface(), {}), /ctx\.fatigue must be a finite number/)
-  assert.throws(() => matchRule(r, surface(), { fatigue: null }), /ctx\.fatigue/)
   assert.throws(() => matchRule(r, surface(), { fatigue: Number.NaN }), /ctx\.fatigue/)
   assert.throws(() => matchRule(r, surface(), { fatigue: '60' }), /ctx\.fatigue/)
+  // 键在、值是 null —— 提供方明确说了「此刻不可知」（例如模型信息拿不到时算不出疲劳度）。
+  // 这时不命中就对了，跟 idle 在「从没调用过这个工具」时返回 false 同构：
+  // 「现在判不了」不该让整轮规则一起失效。
+  assert.equal(matchRule(r, surface(), { fatigue: null }).reason, 'numbers')
+  // 而且它不能连累同一批里的别的规则 —— 那一条自己算得出来就照常命中。
+  const ok = rule({ id: 'other', when: { numbers: { surfaceTokens: { gte: 100 } } } })
+  assert.equal(matchRule(ok, surface(), { fatigue: null, surfaceTokens: 500 }).ok, true)
 })
 
 test('numbers：形状写错在规范化阶段就被拦下', () => {
