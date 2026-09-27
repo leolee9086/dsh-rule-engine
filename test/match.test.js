@@ -130,3 +130,46 @@ test('findRegex：文本里没命中就不跑；正则写坏了直接抛错', ()
   })
   assert.throws(() => matchRule(runtime, surface({ text: 'x' }), {}, { macros: () => '(' }), /not a valid regex/)
 })
+
+test('numbers：按 key 从 ctx 取值比较，引擎不认识指标名', () => {
+  const r = rule({ when: { numbers: { fatigue: { gte: 60 } } } })
+  assert.equal(matchRule(r, surface(), { fatigue: 72 }).ok, true)
+  // 边界含在内：gte 是「大于等于」。
+  assert.equal(matchRule(r, surface(), { fatigue: 60 }).ok, true)
+  assert.equal(matchRule(r, surface(), { fatigue: 30 }).reason, 'numbers')
+  // 指标名叫什么都行 —— 引擎不做任何映射、也不校验名字的含义。
+  const custom = rule({ when: { numbers: { surfaceTokens: { gt: 20000 } } } })
+  assert.equal(matchRule(custom, surface(), { surfaceTokens: 20001 }).ok, true)
+  assert.equal(matchRule(custom, surface(), { surfaceTokens: 20000 }).reason, 'numbers')
+})
+
+test('numbers：多个指标是 AND，同一指标给多个比较符也是 AND', () => {
+  const r = rule({ when: { numbers: { fatigue: { gte: 60 }, wakefulness: { lte: 20 } } } })
+  assert.equal(matchRule(r, surface(), { fatigue: 80, wakefulness: 10 }).ok, true)
+  assert.equal(matchRule(r, surface(), { fatigue: 80, wakefulness: 90 }).reason, 'numbers')
+  assert.equal(matchRule(r, surface(), { fatigue: 10, wakefulness: 10 }).reason, 'numbers')
+  const band = rule({ when: { numbers: { fatigue: { gt: 30, lt: 70 } } } })
+  assert.equal(matchRule(band, surface(), { fatigue: 50 }).ok, true)
+  assert.equal(matchRule(band, surface(), { fatigue: 70 }).reason, 'numbers')
+})
+
+test('numbers：ctx 里没有这个指标就抛错，不给默认值', () => {
+  const r = rule({ when: { numbers: { fatigue: { gte: 60 } } } })
+  // 静默当成 0 或 false 的话，规则会「看起来在生效、其实一直没跑」——
+  // 引擎宁可在这里炸掉。null / NaN / 非数字一样抛。
+  assert.throws(() => matchRule(r, surface(), {}), /ctx\.fatigue must be a finite number/)
+  assert.throws(() => matchRule(r, surface(), { fatigue: null }), /ctx\.fatigue/)
+  assert.throws(() => matchRule(r, surface(), { fatigue: Number.NaN }), /ctx\.fatigue/)
+  assert.throws(() => matchRule(r, surface(), { fatigue: '60' }), /ctx\.fatigue/)
+})
+
+test('numbers：形状写错在规范化阶段就被拦下', () => {
+  const bad = (when, pattern) => assert.throws(() => rule({ when }), pattern)
+  bad({ numbers: [] }, /when\.numbers must be an object/)
+  bad({ numbers: {} }, /must name at least one metric/)
+  bad({ numbers: { fatigue: 60 } }, /when\.numbers\.fatigue must be an object/)
+  bad({ numbers: { fatigue: {} } }, /must name at least one comparison/)
+  bad({ numbers: { fatigue: { above: 60 } } }, /unknown comparison "above"/)
+  bad({ numbers: { fatigue: { gte: '60' } } }, /must be a finite number/)
+})
+
