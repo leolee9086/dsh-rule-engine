@@ -9,6 +9,16 @@ context_care 负责「通知模型」和「篡改上下文」这两类效果，�
 
 为什么要有这一层、以及全部讨论记录，见 [2026-09-22-规则引擎设计.md](2026-09-22-规则引擎设计.md)。
 
+## 原生 v2 匹配
+
+`normalizeRuleV2` 校验多动作规则，`detectRulesV2` 返回一次命中的捕获、UTF-16 半开区间及原始块引用。`select.depth` 先按消息、轮次或块计数，再筛选角色与块类型；正文、思考、工具调用与结果可独立选择。执行、模板渲染和状态保存由消费插件负责，引擎本身不产生副作用。
+
+输出消费方可传 `freshSeq`，同时提供截至该序号的完整历史窗口。跨块正则和关键词优先选择触及当前输出的匹配；只命中历史内容的规则不会认领独占组。返回的 `triggerSeq` 表示实际触发输出，`sourceSeqs` 保留整个检查窗口，不能用窗口里恰好包含新消息来代替触发证据。未传 `freshSeq` 的请求装配匹配保持按窗口选择的行为。原生正则必须由执行宿主放在可终止的 Worker 中运行，以限制回溯耗时。
+
+v0.3.0 公开 `V2_STAGES`、`V2_ACTIONS`、`readBinding`、`bindInputs`、`normalizeRuleV2`、`selectBlocksV2`、`matchConditionV2`、`detectRulesV2`、`validateDetectorEvidenceV2` 与 `applyBlockPatchesV2`，保留已有 v1 导出。根正则条件的 `all: true` 返回各次命中的独立捕获与范围（最多 1000 次），零宽匹配按 Unicode 码点前进。外部 detector 的结果通过统一证据校验后参与原生优先级与互斥选择；执行宿主持有 detector 注册、线程、取消和状态，引擎不执行插件回调。
+
+v2 的替换区间针对不可变基线，重叠写入按优先级决议。它与旧 `applyRules` 按前一条结果继续替换的顺序语义不同；消费方必须选择对应 API，不混用区间。
+
 ## 用法
 
 ```js

@@ -1,6 +1,6 @@
 {
   "name": "@leolee9086/dsh-rule-engine",
-  "version": "0.2.0",
+  "version": "0.3.0",
   "description": "DSH 专用的规则引擎：输入规则集与上下文，输出该做什么。核心是纯函数，不依赖 DSH。",
   "type": "module",
   "main": "lib/index.js",
@@ -29,6 +29,7 @@
     "prefix-cache"
   ],
   "scripts": {
-    "test": "node --test"
+    "test": "node --test",
+    "prepack": "pnpm test"
   }
 }
