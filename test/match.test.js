@@ -120,7 +120,7 @@ test('findRegex：文本里没命中就不跑；正则写坏了直接抛错', ()
   // NONE 模式下写坏的正则，规范化阶段就被拦下了。
   assert.throws(
     () => rule({ id: 'broken', action: { kind: 'transform' }, when: { findRegex: '/(/', replaceString: 'x' }, budget: { maxCacheLoss: 1 } }),
-    /not a valid regex/,
+    /cannot compile regex/,
   )
   // RAW 模式下正则要等宏替换完才能判，那就到运行时才抛 —— 但一样是抛，不是静默不命中。
   const runtime = rule({
@@ -128,7 +128,7 @@ test('findRegex：文本里没命中就不跑；正则写坏了直接抛错', ()
     when: { findRegex: '/{{q}}/', replaceString: 'x', substituteRegex: 1 },
     budget: { maxCacheLoss: 1 },
   })
-  assert.throws(() => matchRule(runtime, surface({ text: 'x' }), {}, { macros: () => '(' }), /not a valid regex/)
+  assert.throws(() => matchRule(runtime, surface({ text: 'x' }), {}, { macros: () => '(' }), /cannot compile regex/)
 })
 
 test('numbers：按 key 从 ctx 取值比较，引擎不认识指标名', () => {

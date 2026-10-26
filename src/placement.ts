@@ -30,8 +30,16 @@ export const PLACEMENT = Object.freeze({
   REQUEST: 'request',
 })
 
+/** 一个合法的规则作用位置。 */
+export type Placement = (typeof PLACEMENT)[keyof typeof PLACEMENT]
+
 /** 全部合法位置。 */
-export const PLACEMENTS = Object.freeze(Object.values(PLACEMENT))
+export const PLACEMENTS: readonly Placement[] = Object.freeze(Object.values(PLACEMENT))
+
+/** 判定一个未知值是不是合法位置。 */
+export function isPlacement(value: unknown): value is Placement {
+  return typeof value === 'string' && PLACEMENTS.some(spot => spot === value)
+}
 
 /**
  * 规则作用域。
@@ -48,5 +56,13 @@ export const SCOPE = Object.freeze({
   PRESET: 2,
 })
 
+/** 一个合法的规则作用域。 */
+export type Scope = (typeof SCOPE)[keyof typeof SCOPE]
+
 /** 全部合法作用域。 */
-export const SCOPES = Object.freeze(Object.values(SCOPE))
+export const SCOPES: readonly Scope[] = Object.freeze(Object.values(SCOPE))
+
+/** 判定一个未知值是不是合法作用域。 */
+export function isScope(value: unknown): value is Scope {
+  return SCOPES.some(scope => scope === value)
+}

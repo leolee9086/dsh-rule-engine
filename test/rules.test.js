@@ -73,9 +73,9 @@ test('规范化：布尔字段给了就必须是布尔，不悄悄当成 false',
 })
 
 test('规范化：when 里写坏的正则当场拒绝', () => {
-  assert.throws(() => normalizeRule({ ...TRANSFORM, when: { findRegex: '/(/', replaceString: 'b' } }, 0), /not a valid regex/)
-  assert.throws(() => normalizeRule({ ...TRANSFORM, when: { findRegex: '/a/z', replaceString: 'b' } }, 0), /not a valid regex/)
-  assert.throws(() => normalizeRule({ ...NOTIFY, when: { said: '/(/' } }, 0), /not a valid regex/)
+  assert.throws(() => normalizeRule({ ...TRANSFORM, when: { findRegex: '/(/', replaceString: 'b' } }, 0), /cannot compile regex/)
+  assert.throws(() => normalizeRule({ ...TRANSFORM, when: { findRegex: '/a/z', replaceString: 'b' } }, 0), /invalid regex flags "z"/)
+  assert.throws(() => normalizeRule({ ...NOTIFY, when: { said: '/(/' } }, 0), /cannot compile regex/)
   assert.throws(() => normalizeRule({ ...NOTIFY, when: { trimStrings: [''] } }, 0), /trimStrings/)
   assert.throws(() => normalizeRule({ ...NOTIFY, when: { trimStrings: [1] } }, 0), /trimStrings/)
   assert.throws(() => normalizeRule({ ...NOTIFY, when: { substituteRegex: 9 } }, 0), /substituteRegex/)

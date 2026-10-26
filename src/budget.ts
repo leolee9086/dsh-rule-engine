@@ -15,15 +15,12 @@
  * 这一层不依赖 DSH，也不依赖任何具体插件。
  */
 
+
 /**
  * UTF-8 字节长度。
  * 用 Buffer 而不是 TextEncoder：这条路径每次请求都要走，Buffer.byteLength 不分配内存。
- *
- * @param {string} text 文本。
- * @returns {number} 字节数。
- * @throws {TypeError} 输入不是字符串时抛出。
  */
-export function byteLength(text) {
+export function byteLength(text: string): number {
   if (typeof text !== 'string') {
     throw new TypeError('dsh-rule-engine: byteLength expects a string, got ' + typeof text)
   }
@@ -31,7 +28,7 @@ export function byteLength(text) {
 }
 
 /** 是不是 UTF-16 高代理（切点落在它后面会把一个字符切成两半）。 */
-function isHighSurrogate(code) {
+function isHighSurrogate(code: number): boolean {
   return code >= 0xd800 && code <= 0xdbff
 }
 
@@ -40,13 +37,8 @@ function isHighSurrogate(code) {
  *
  * 按 UTF-16 码元逐位比较再换算成字节 —— 公共前缀上的码元相同就意味着字节相同。
  * 切点落在代理对中间时退一格，免得把半个字符算进前缀（也会让调用方拿到非法字符串）。
- *
- * @param {string} a 左串。
- * @param {string} b 右串。
- * @returns {number} 公共前缀的字节数。
- * @throws {TypeError} 输入不是字符串时抛出。
  */
-export function commonPrefixBytes(a, b) {
+export function commonPrefixBytes(a: string, b: string): number {
   if (typeof a !== 'string' || typeof b !== 'string') {
     throw new TypeError('dsh-rule-engine: commonPrefixBytes expects two strings')
   }
@@ -62,15 +54,8 @@ export function commonPrefixBytes(a, b) {
  *
  * 定义：因为这次变换而废掉的字节数 / 上一次请求的总字节数。
  * 废掉的部分 = 「不变换时能命中的前缀」减去「变换后能命中的前缀」。
- *
- * @param {string|null|undefined} previous 最近一次同接口请求的文本；没有就传 null。
- *        这不是兜底 —— 「没有上一次请求」和「上一次是空请求」是两件事，前者确实没有缓存可失效。
- * @param {string} baseline 本次请求未变换时的文本。
- * @param {string} candidate 变换后的文本。
- * @returns {number} 0..1 的失效比例；previous 为空时恒为 0。
- * @throws {TypeError} baseline / candidate 不是字符串时抛出。
  */
-export function cacheLossRatio(previous, baseline, candidate) {
+export function cacheLossRatio(previous: string | null | undefined, baseline: string, candidate: string): number {
   if (typeof baseline !== 'string' || typeof candidate !== 'string') {
     throw new TypeError('dsh-rule-engine: cacheLossRatio expects baseline and candidate to be strings')
   }
@@ -86,14 +71,53 @@ export function cacheLossRatio(previous, baseline, candidate) {
   return lost <= 0 ? 0 : lost / total
 }
 
-/** 按 index 把片段换成新内容，拼回一整串文本。 */
-function compose(segments, replacements) {
-  const byIndex = new Map(replacements.map(item => [item.index, item.text]))
-  return segments.map((segment, index) => (byIndex.has(index) ? byIndex.get(index) : segment)).join('')
+/** 一处想替换的片段。 */
+export interface Replacement {
+  /** 片段下标。 */
+  index: number
+  /** 换成什么。 */
+  text: string
+  /** true 表示「不做就不能发」，无条件接受，不参与预算收缩。 */
+  required?: boolean
 }
 
-/** 校验 selectWithinBudget 的入参。 */
-function checkPlanInput({ segments, replacements, maxCacheLoss }) {
+/** 按 index 把片段换成新内容，拼回一整串文本。 */
+function compose(segments: readonly string[], replacements: readonly Replacement[]): string {
+  const byIndex = new Map<number, string>(replacements.map(item => [item.index, item.text]))
+  return segments.map((segment, index) => byIndex.get(index) ?? segment).join('')
+}
+
+/** selectWithinBudget 的入参。 */
+export interface BudgetPlanInput {
+  /** 最近一次同接口请求的文本。 */
+  previous?: string | null
+  /** 本次请求的文本片段（按顺序；拼接起来就是完整文本）。 */
+  segments: readonly string[]
+  /** 想改的片段。 */
+  replacements: readonly Replacement[]
+  /** 允许的最大失效比例（0..1）。 */
+  maxCacheLoss: number
+}
+
+/** 预算收缩的结果。 */
+export interface BudgetPlan {
+  /** 最终文本。 */
+  text: string
+  /** 被接受的片段下标。 */
+  accepted: number[]
+  /** 被预算拒掉的片段下标。 */
+  rejected: number[]
+  /** 无条件接受（required）的片段下标。 */
+  forced: number[]
+  /** 最终失效比例。 */
+  loss: number
+  /** 「必须做的那些本身就已经超出预算」—— 调用方据此拒绝发送。 */
+  exceedsBudget: boolean
+}
+
+/** 校验 selectWithinBudget 的入参。运行时防线对 JS 调用方同样有效。 */
+function checkPlanInput(input: BudgetPlanInput): void {
+  const { segments, replacements, maxCacheLoss } = input
   if (!Array.isArray(segments)) {
     throw new TypeError('dsh-rule-engine: segments must be an array of strings')
   }
@@ -105,7 +129,7 @@ function checkPlanInput({ segments, replacements, maxCacheLoss }) {
   if (!Array.isArray(replacements)) {
     throw new TypeError('dsh-rule-engine: replacements must be an array')
   }
-  const seen = new Set()
+  const seen = new Set<number>()
   for (const item of replacements) {
     if (typeof item !== 'object' || item === null) {
       throw new TypeError('dsh-rule-engine: each replacement must be an object like { index, text }')
@@ -135,30 +159,21 @@ function checkPlanInput({ segments, replacements, maxCacheLoss }) {
  * 为什么从尾部往前：缓存是前缀，越靠后的改动废掉的东西越少，尾部优先是最优解。
  * 为什么贪心就够：改动点越靠前，失效范围越大，代价单调不减 ——
  * 所以「从尾部往前加，加到超预算为止」拿到的就是能改的最靠后的一批。
- *
- * @param {object} input
- * @param {string|null|undefined} input.previous 最近一次同接口请求的文本。
- * @param {string[]} input.segments 本次请求的文本片段（按顺序；拼接起来就是完整文本）。
- * @param {Array<{index: number, text: string, required?: boolean}>} input.replacements 想改的片段。
- *        required = true 表示「不做就不能发」（隐私清洗这类），无条件接受，不参与预算收缩。
- * @param {number} input.maxCacheLoss 允许的最大失效比例（0..1）。
- * @returns {{text: string, accepted: number[], rejected: number[], forced: number[], loss: number, exceedsBudget: boolean}}
- *          text 是最终文本；accepted/rejected/forced 是片段下标；
- *          exceedsBudget 表示「必须做的那些本身就已经超出预算」—— 调用方据此拒绝发送。
- * @throws {TypeError|Error} 入参形状不对时抛出。
  */
-export function selectWithinBudget({ previous, segments, replacements, maxCacheLoss }) {
-  checkPlanInput({ segments, replacements, maxCacheLoss })
+export function selectWithinBudget(input: BudgetPlanInput): BudgetPlan {
+  checkPlanInput(input)
+  const { previous, segments, replacements, maxCacheLoss } = input
   const baseline = segments.join('')
   const plan = [...replacements].sort((a, b) => a.index - b.index)
   const forced = plan.filter(item => item.required === true)
   const optional = plan.filter(item => item.required !== true)
-  const accepted = [...forced]
-  const rejected = []
+  const accepted: Replacement[] = [...forced]
+  const rejected: Replacement[] = []
   let text = compose(segments, accepted)
   let loss = cacheLossRatio(previous, baseline, text)
   for (let i = optional.length - 1; i >= 0; i--) {
-    const trial = [...accepted, optional[i]]
+    const pick = optional[i]
+    const trial = [...accepted, pick]
     const candidate = compose(segments, trial)
     const trialLoss = cacheLossRatio(previous, baseline, candidate)
     if (trialLoss > maxCacheLoss) {
@@ -166,11 +181,11 @@ export function selectWithinBudget({ previous, segments, replacements, maxCacheL
       rejected.push(...optional.slice(0, i + 1).reverse())
       break
     }
-    accepted.push(optional[i])
+    accepted.push(pick)
     text = candidate
     loss = trialLoss
   }
-  const indexes = list => list.map(item => item.index).sort((a, b) => a - b)
+  const indexes = (list: readonly Replacement[]): number[] => list.map(item => item.index).sort((a, b) => a - b)
   return {
     text,
     accepted: indexes(accepted),

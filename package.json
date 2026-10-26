@@ -1,11 +1,14 @@
 {
   "name": "@leolee9086/dsh-rule-engine",
-  "version": "0.3.0",
-  "description": "DSH 专用的规则引擎：输入规则集与上下文，输出该做什么。核心是纯函数，不依赖 DSH。",
+  "version": "0.4.0",
+  "description": "DSH 专用的规则引擎：规则校验、匹配、文本变换与有状态调度，不依赖 DSH 运行时。",
   "type": "module",
   "main": "lib/index.js",
   "exports": {
-    ".": "./lib/index.js",
+    ".": {
+      "types": "./lib/index.d.ts",
+      "default": "./lib/index.js"
+    },
     "./package.json": "./package.json"
   },
   "files": [
@@ -29,7 +32,18 @@
     "prefix-cache"
   ],
   "scripts": {
-    "test": "node --test",
-    "prepack": "pnpm test"
-  }
+    "build": "tsc -p tsconfig.json",
+    "lint": "eslint src",
+    "test": "pnpm build && node --test",
+    "check": "pnpm build && pnpm lint && node --test",
+    "prepack": "pnpm check"
+  },
+  "devDependencies": {
+    "@types/node": "^22.20.5",
+    "@typescript-eslint/eslint-plugin": "^8.72.0",
+    "@typescript-eslint/parser": "^8.72.0",
+    "eslint": "^9.39.5",
+    "typescript": "5.8.3"
+  },
+  "types": "./lib/index.d.ts"
 }

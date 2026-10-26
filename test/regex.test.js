@@ -15,13 +15,13 @@ test('正则字符串：/pattern/flags 与裸 pattern 都能编译', () => {
   assert.equal(bare.flags, '')
 })
 
-test('编译不出来时返回 null，不猜它本来想干什么', () => {
-  assert.equal(regexFromString('/(/'), null)
-  assert.equal(regexFromString(''), null)
+test('编译不出来时抛错，错误里带原始 pattern 与底层原因', () => {
+  assert.throws(() => regexFromString('/(/'), /cannot compile regex .*Unterminated group/)
+  assert.throws(() => regexFromString(''), /empty pattern/)
   // 酒馆在 flag 非法时会退回「把整个输入当 pattern」，于是 /a/z 悄悄变成匹配 a/z 的正则。
-  // 这里不跟：flag 非法就是写错了。
-  assert.equal(regexFromString('/a/z'), null)
-  assert.equal(regexFromString('/(a)/z'), null)
+  // 这里不跟：flag 非法就是写错了，而且错误要说清是哪个 flag。
+  assert.throws(() => regexFromString('/a/z'), /invalid regex flags "z"/)
+  assert.throws(() => regexFromString('/(a)/z'), /invalid regex flags "z"/)
   assert.throws(() => regexFromString(123), TypeError)
 })
 
@@ -88,7 +88,7 @@ test('sanitizeRegexMacro 把宏值变成能匹配字面量的正则', () => {
 test('runRegexScript 对说不清楚的输入直接抛错', () => {
   assert.throws(() => runRegexScript({ findRegex: '/a/', replaceString: 'b' }, 123), TypeError)
   // 正则编译不出来是写坏了，不是「没命中」。
-  assert.throws(() => runRegexScript({ findRegex: '/(/', replaceString: 'x' }, 'a'), /not a valid regex/)
+  assert.throws(() => runRegexScript({ findRegex: '/(/', replaceString: 'x' }, 'a'), /cannot compile regex "\/\(\/"/)
   // replaceString 省略和空串是两回事：省略是没说，空串是换成空。
   assert.throws(() => runRegexScript({ findRegex: '/a/' }, 'a'), /replaceString/)
   assert.equal(runRegexScript({ findRegex: '/a/', replaceString: '' }, 'a'), '')
@@ -114,9 +114,9 @@ test('RegexProvider：命中返回同一个对象，满容量淘汰最久没用�
   assert.notEqual(provider.get('/a/'), first)
 })
 
-test('RegexProvider：编译不出来返回 null，并且不写进缓存', () => {
+test('RegexProvider：编译不出来抛错，并且不写进缓存', () => {
   const provider = new RegexProvider()
-  assert.equal(provider.get('/(/'), null)
+  assert.throws(() => provider.get('/(/'), /cannot compile regex/)
   assert.equal(provider.size, 0)
   assert.throws(() => provider.get(123), TypeError)
 })

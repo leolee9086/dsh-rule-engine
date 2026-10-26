@@ -4,3 +4,4 @@ node_modules/
 .npm-verify/
 # 本地发布验证输出；发行说明和开发记录仍纳入版本控制。
 /artifacts/*.log
+lib/

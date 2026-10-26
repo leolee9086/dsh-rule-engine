@@ -2,10 +2,13 @@
 
 DSH 专用的规则引擎：输入「规则集 + 一段上下文」，输出「该做什么」。
 
-核心是纯函数，不依赖 DSH，也不依赖任何具体插件。规则命中后交给关心它的人：
+引擎不依赖 DSH 运行时，也不依赖任何具体插件：它只认识规则、块、区间和上下文，不碰 Cordis、Session、LLM 这些宿主服务。规则命中后交给关心它的人：
 context_care 负责「通知模型」和「篡改上下文」这两类效果，别的插件也可以听同一条规则去做别的事
 —— 循环输出时，它给模型注入一句「你在重复」，另一个插件在界面上提醒用户。
 `action.by` 指名交给谁；不写就按 kind 广播给所有订阅者。
+
+`createEngine` 是可选的有状态外壳（规则来源、消费者注册、冷却、命中日志）。不需要这些时直接用
+`applyRules` / `detectRulesV2` 这类函数，它们不持有任何跨调用状态。
 
 为什么要有这一层、以及全部讨论记录，见 [2026-09-22-规则引擎设计.md](2026-09-22-规则引擎设计.md)。
 
@@ -15,7 +18,7 @@ context_care 负责「通知模型」和「篡改上下文」这两类效果，�
 
 输出消费方可传 `freshSeq`，同时提供截至该序号的完整历史窗口。跨块正则和关键词优先选择触及当前输出的匹配；只命中历史内容的规则不会认领独占组。返回的 `triggerSeq` 表示实际触发输出，`sourceSeqs` 保留整个检查窗口，不能用窗口里恰好包含新消息来代替触发证据。未传 `freshSeq` 的请求装配匹配保持按窗口选择的行为。原生正则必须由执行宿主放在可终止的 Worker 中运行，以限制回溯耗时。
 
-v0.3.0 公开 `V2_STAGES`、`V2_ACTIONS`、`readBinding`、`bindInputs`、`normalizeRuleV2`、`selectBlocksV2`、`matchConditionV2`、`detectRulesV2`、`validateDetectorEvidenceV2` 与 `applyBlockPatchesV2`，保留已有 v1 导出。根正则条件的 `all: true` 返回各次命中的独立捕获与范围（最多 1000 次），零宽匹配按 Unicode 码点前进。外部 detector 的结果通过统一证据校验后参与原生优先级与互斥选择；执行宿主持有 detector 注册、线程、取消和状态，引擎不执行插件回调。
+包入口公开 `V2_STAGES`、`V2_ACTIONS`、`readBinding`、`bindInputs`、`normalizeRuleV2`、`selectBlocksV2`、`matchConditionV2`、`detectRulesV2`、`validateDetectorEvidenceV2` 与 `applyBlockPatchesV2`，保留已有 v1 导出。根正则条件的 `all: true` 返回各次命中的独立捕获与范围（最多 1000 次），零宽匹配按 Unicode 码点前进。外部 detector 的结果通过统一证据校验后参与原生优先级与互斥选择；执行宿主持有 detector 注册、线程、取消和状态，通过 `detectorMatch` 回调向引擎提供匹配证据。
 
 v2 的替换区间针对不可变基线，重叠写入按优先级决议。它与旧 `applyRules` 按前一条结果继续替换的顺序语义不同；消费方必须选择对应 API，不混用区间。
 
@@ -208,14 +211,17 @@ plan.exceedsBudget   // 必须做的那些本身就已经超预算 —— 调用
 
 | 文件 | 管什么 |
 |---|---|
-| lib/placement.js | 作用位置与作用域常量 |
-| lib/regex.js | 正则编译、替换、宏替换（搬运自酒馆） |
-| lib/rules.js | 规则的校验与规范化 |
-| lib/match.js | 触发条件匹配 |
-| lib/budget.js | 前缀缓存的字节级估算与预算收缩 |
-| lib/apply.js | 把规则作用在一段文本上（纯函数） |
-| lib/engine.js | 规则来源、消费者注册、冷却与去重、命中日志 |
-| lib/index.js | 汇总导出 |
+| src/placement.ts | 作用位置与作用域常量 |
+| src/guard.ts | 类型收窄函数（unknown → 具体类型） |
+| src/types.ts | 跨模块共享的数据形状 |
+| src/regex.ts | 正则编译、替换、宏替换（搬运自酒馆） |
+| src/rules.ts | 规则的校验与规范化 |
+| src/match.ts | 触发条件匹配 |
+| src/budget.ts | 前缀缓存的字节级估算与预算收缩 |
+| src/apply.ts | 把规则作用在一段文本上（纯函数） |
+| src/v2.ts | v2 规则、条件求值、块选择、补丁应用 |
+| src/engine.ts | 规则来源、消费者注册、冷却与去重、命中日志 |
+| src/index.ts | 汇总导出 |
 
 ## 从酒馆搬来的与改掉的
 
@@ -234,9 +240,18 @@ plan.exceedsBudget   // 必须做的那些本身就已经超预算 —— 调用
 - 优先级去掉「列表内顺序」这一层兜底，`order` 必填。
 - 不做降级回退：酒馆在好几处把说不清楚的输入悄悄当成另一种意思，这里一律判为失败。
 
-## 还没做的
+## 开发与发布
 
-- 没有接入任何插件。接 fetch-router 要加两样：改 body + 规则来源运行时提供。
-- 没有面板。fetch-router 那个右侧栏面板（逐请求行 + 顶部计数 + 暂停按钮）是现成先例。
-- 规则来源的接口形状还没定死：现在是一个返回规则数组的函数，够用，但「来源怎么被卸载、
-  怎么和预设绑定」还没想。
+源码位于 `src/`，`pnpm build` 生成 `lib/` 中的 JavaScript、类型声明和 source map。包入口同时提供运行时 API 与 TypeScript 类型；构建产物不纳入版本控制。
+
+```powershell
+pnpm install --frozen-lockfile
+pnpm check
+```
+
+`pnpm check` 运行 TypeScript 构建、ESLint 和测试。`prepack` 执行同一检查链。发布必须使用已提交并与上游同步的 `main` 分支，保持工作树干净，不禁用 Git 检查。
+
+```powershell
+pnpm login --auth-type=web --registry=https://registry.npmjs.org/
+pnpm publish --access public --registry=https://registry.npmjs.org/
+```
