@@ -13,6 +13,7 @@
 
 import type { Macros } from './types.js'
 import { isRecord } from './guard.js'
+import { replaceText } from './text-edits.js'
 
 /** findRegex 里的宏怎么替换，照搬酒馆的 substitute_find_regex。 */
 export const SUBSTITUTE_FIND_REGEX = Object.freeze({
@@ -282,7 +283,7 @@ export function runRegexScript(script: RegexScript, rawString: string, { macros 
   }
   const findRegex = provider.get(resolveFindRegex(script, macros))
 
-  return rawString.replace(findRegex, function (match: string, ...rest: unknown[]): string {
+  return replaceText(rawString, findRegex, function (match: string, ...rest: unknown[]): string {
     // 酒馆用 [...arguments] 取参：args[0] 是整段匹配，args[1..] 是捕获组，
     // 末尾多出来的是 offset / 整串 / 具名组对象。这里保持同样的索引方式。
     const args: unknown[] = [match, ...rest]

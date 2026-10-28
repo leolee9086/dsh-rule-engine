@@ -10,9 +10,19 @@
  * 「变换必须留下记录」：每条记录都交给 onRecord 回调，由宿主写成一条 agent 看不到的
  * session 事件。库本身不依赖 DSH，所以这里只给回调，不碰会话。
  */
-import { normalizeRules, sortRules, isActionKind } from './rules.js'
+import { normalizeRule, normalizeRules, sortRules, sortUniqueRules, isActionKind } from './rules.js'
+import { createRuleExtensions } from './rule-extensions.js'
+import { detectRulesV2, hasStageRules, type DetectInput, type RuleEvent } from './block-rules.js'
+import type { RuleDocument } from './declarations.js'
+import { planStage, type StagePlanInput } from './stage-plan.js'
+import { planDisplay, planDisplayAsync, type DisplayPlanInput } from './display-plan.js'
+import type { TextTransformExecutor } from './text-transform-plan.js'
+import type { DisplayBlock, PlanningBlock, PlanningRequest } from './planning-types.js'
 import { applyRules } from './apply.js'
+import { createEventRuntime } from './event-runtime.js'
+import type { EventOptions } from './event-state.js'
 import { isUnknownArray } from './guard.js'
+import { OwnedJson } from './input-schema.js'
 import type { RegexProvider } from './regex.js'
 import type { MatchContext, MatchSurface } from './match.js'
 import type { ActionKind, GateVerdict, Hit, Macros, NormalizedRule, RuleAction, Surface } from './types.js'
@@ -78,6 +88,19 @@ export interface ConsumerInput {
 export interface RunInput {
   surface?: MatchSurface
   ctx?: EngineContext
+  /** 独立调用身份共享同一规则领域与账本，不能通过另建 Engine 隔离状态。 */
+  key?: string
+  rules?: unknown
+  query?: RuleQuery
+  consumers?: readonly ConsumerInput[]
+  current?: () => boolean
+  onRecord?: (record: EngineRecord) => void
+}
+export interface TextPlan {
+  result: RunOutput
+  payloads: DeliveryPayload[]
+  /** 真实环境 ACK 后才提交去重与冷却；同一计划只提交一次。 */
+  commit(): RunOutput
 }
 
 /** run 的结果。 */
@@ -100,11 +123,31 @@ type DeliveryPlan =
   | { ok: true; targets: [string, RegisteredConsumer][]; outcome?: undefined; detail?: undefined }
 
 /** 引擎对象。 */
+export interface RuleQuery {
+  sessionId?: string
+  presetId?: string
+  documents?: readonly RuleDocument[]
+  /** 只查询当前操作拥有的来源；来源名仍由注册表管理。 */
+  sourceNames?: readonly string[]
+}
 export interface Engine {
-  rules(): NormalizedRule[]
-  provideRules(name: string, produce: () => unknown): () => void
+  /** 贡献编译到同一计划的条件与动作；目录代次参与计划失效。 */
+  extensions: ReturnType<typeof createRuleExtensions>
+  compile(input: unknown): NormalizedRule
+  token(): number
+  observeCapabilities(observer: () => void): () => void
+  rules(query?: RuleQuery): NormalizedRule[]
+  provideRules(name: string, produce: (query?: RuleQuery) => unknown): () => void
   registerConsumer(input?: ConsumerInput): () => void
   run(input?: RunInput): RunOutput
+  prepare(input?: RunInput): TextPlan
+  release(key: string): void
+  /** 同一来源注册表上的块检测，沿用统一排序与归一化。 */
+  detect(input: Omit<DetectInput, 'rules'>, query?: RuleQuery): RuleEvent[]
+  plan<R extends PlanningRequest, B extends PlanningBlock>(input: Omit<StagePlanInput<R, B>, 'rules'> & { rules?: StagePlanInput<R, B>['rules'] }): ReturnType<typeof planStage<R, B>>
+  display<B extends DisplayBlock>(input: Omit<DisplayPlanInput<B>, 'rules'> & { rules?: DisplayPlanInput<B>['rules'] }, query?: RuleQuery): ReturnType<typeof planDisplay<B>>
+  displayAsync<B extends DisplayBlock>(input: Omit<DisplayPlanInput<B>, 'rules'> & { rules?: DisplayPlanInput<B>['rules'] }, execute: TextTransformExecutor, signal?: AbortSignal, query?: RuleQuery): ReturnType<typeof planDisplayAsync<B>>
+  events(options: EventOptions): ReturnType<typeof createEventRuntime>
   fingerprintOf(ruleId: string, text: string): string
   consumers(): string[]
   sources(): string[]
@@ -130,28 +173,72 @@ export function createEngine({ rules, macros, provider, onRecord, now }: EngineO
     throw new TypeError('dsh-rule-engine: onRecord must be a function')
   }
   const clock = now ?? ((): number => Date.now())
-  const installed = normalizeRules(rules)
+  const extensions = createRuleExtensions()
+  let compilationChecks: (() => boolean)[] | undefined
+  // 缓存只接收共同 JSON 所有权校验通过的值，避免 NaN、accessor、循环或
+  // undefined 经 JSON.stringify 丢失信息而错误复用。调用方始终拿到独立副本。
+  const compiled = new Map<string, { rule: NormalizedRule; current: () => boolean }>()
+  const compileRule = (input: unknown, index = 0) => {
+    const json = OwnedJson.safeParse(input), key = json.success ? JSON.stringify(json.data) : undefined
+    const previous = key === undefined ? undefined : compiled.get(key)
+    if (previous?.current()) { compilationChecks?.push(previous.current); return structuredClone(previous.rule) }
+    const prepared = extensions.prepare(input), rule = normalizeRule(prepared.value, index)
+    compilationChecks?.push(prepared.current)
+    if (key !== undefined) {
+      const saved = { rule: structuredClone(rule), current: prepared.current }
+      compiled.set(key, saved)
+      while (compiled.size > 256) { const oldest = compiled.keys().next(); if (oldest.done) break; compiled.delete(oldest.value) }
+    }
+    return rule
+  }
+  const compiledRules = (input: unknown) => isUnknownArray(input) ? sortUniqueRules(input.map(compileRule)) : normalizeRules(input)
+  // 原始声明保留在注册边界，能力被替换或卸载后不得继续执行陈旧编译结果。
+  const declarations = rules
+  let installedChecks: (() => boolean)[] = []
+  compilationChecks = installedChecks
+  let installed = compiledRules(declarations)
+  compilationChecks = undefined
   /** 运行时规则来源：名字 → 返回规则数组的函数。 */
-  const sources = new Map<string, () => unknown>()
+  type SourceContribution = { kind: 'declaration'; produce: (query?: RuleQuery) => unknown }
+    | { kind: 'snapshot'; produce: (query?: RuleQuery) => { rules: readonly NormalizedRule[]; checks: readonly (() => boolean)[] } }
+  const sources = new Map<string, SourceContribution>()
   /** 消费者：名字 → { kinds, handle }。 */
   const consumers = new Map<string, RegisteredConsumer>()
-  /** 每条规则上次真正生效的时间。 */
-  const lastRunAt = new Map<string, number>()
-  /** oncePerSurface 的指纹。 */
-  const seenSurfaces = new Set<string>()
+  let registrationsRevision = 0
+  const token = () => registrationsRevision + extensions.token()
+  /** 文本与原生阶段同属本领域；每个调用身份只保有自己的已提交账本。 */
+  const textState = new Map<string, { lastRunAt: Map<string, number>; seen: Set<string>; revision: number }>()
+  const stateFor = (key: string) => {
+    let state = textState.get(key)
+    if (!state) { state = { lastRunAt: new Map(), seen: new Set(), revision: 0 }; textState.set(key, state) }
+    return state
+  }
 
   /**
    * 当前全部规则：静态配置 + 各来源现给的。
    * 来源给的规则每次都要重新校验 —— 来源是别的插件，写错的规则应该立刻抛错，
    * 而不是悄悄不生效（规则引擎的产物是要发出去的请求，静默失效最危险）。
    */
-  function currentRules(): NormalizedRule[] {
+  function currentRules(query?: RuleQuery): NormalizedRule[] {
+    if (installedChecks.some(check => !check())) {
+      const previous = compilationChecks, nextChecks: (() => boolean)[] = []
+      compilationChecks = nextChecks
+      try { installed = compiledRules(declarations); installedChecks = nextChecks }
+      finally { compilationChecks = previous }
+    }
+    compilationChecks?.push(...installedChecks)
     const extra: NormalizedRule[] = []
-    for (const [name, produce] of sources) {
-      const produced = produce()
-      if (produced === undefined || produced === null) continue
+    for (const [name, contribution] of sources) {
+      if (query?.sourceNames && !query.sourceNames.includes(name)) continue
       try {
-        extra.push(...normalizeRules(produced))
+        if (contribution.kind === 'snapshot') {
+          const snapshot = contribution.produce(query)
+          compilationChecks?.push(...snapshot.checks)
+          extra.push(...structuredClone(snapshot.rules))
+        } else {
+          const produced = contribution.produce(query)
+          if (produced !== undefined && produced !== null) extra.push(...compiledRules(produced))
+        }
       } catch (error) {
         const message = error instanceof Error ? error.message : String(error)
         throw new Error('dsh-rule-engine: rule source "' + name + '" produced invalid rules: ' + message, { cause: error })
@@ -166,15 +253,19 @@ export function createEngine({ rules, macros, provider, onRecord, now }: EngineO
    * @param produce 取规则的函数。
    * @returns 取消注册。
    */
-  function provideRules(name: string, produce: () => unknown): () => void {
+  function provideRules(name: string, produce: (query?: RuleQuery) => unknown): () => void {
     if (typeof name !== 'string' || name.length === 0) {
       throw new Error('dsh-rule-engine: rule source needs a name')
     }
     if (typeof produce !== 'function') {
       throw new Error('dsh-rule-engine: rule source "' + name + '" needs a function')
     }
-    sources.set(name, produce)
-    return () => sources.delete(name)
+    return installSource(name, { kind: 'declaration', produce })
+  }
+  function installSource(name: string, contribution: SourceContribution) {
+    sources.set(name, contribution); registrationsRevision++
+    // 相同函数仍可有多个拥有者，旧 disposer 只能释放自己的贡献。
+    return () => { if (sources.get(name) === contribution) { sources.delete(name); registrationsRevision++ } }
   }
 
   /**
@@ -199,8 +290,9 @@ export function createEngine({ rules, macros, provider, onRecord, now }: EngineO
     if (typeof handle !== 'function') {
       throw new Error('dsh-rule-engine: consumer "' + name + '" needs a handle function')
     }
-    consumers.set(name, { kinds: accepted, handle })
-    return () => consumers.delete(name)
+    const contribution = { kinds: accepted, handle }
+    consumers.set(name, contribution); registrationsRevision++
+    return () => { if (consumers.get(name) === contribution) { consumers.delete(name); registrationsRevision++ } }
   }
 
   /**
@@ -211,7 +303,7 @@ export function createEngine({ rules, macros, provider, onRecord, now }: EngineO
     return rule.id + '\u0000' + surface.text
   }
 
-  function rememberSurface(print: string): void {
+  function rememberSurface(seenSurfaces: Set<string>, print: string): void {
     seenSurfaces.add(print)
     if (seenSurfaces.size > MAX_SURFACE_MEMORY) {
       // Set 保持插入顺序，队首就是最老的。
@@ -229,11 +321,12 @@ export function createEngine({ rules, macros, provider, onRecord, now }: EngineO
    * 只在记录里留下一条失效事件 —— 改完文本再记一笔「没人接」，
    * 等于告诉调用方「改好了」，那是行为与意图不符。
    */
-  function planDelivery(rule: NormalizedRule): DeliveryPlan {
+  function planDelivery(rule: NormalizedRule, selected = consumers): DeliveryPlan {
+    if (rule.action.kind === 'sequence') return { ok: false, outcome: 'stage-required', detail: '多动作规则需要阶段输入' }
     const kind = rule.action.kind
     const by = rule.action.by
     if (by !== undefined) {
-      const consumer = consumers.get(by)
+      const consumer = selected.get(by)
       if (consumer === undefined) {
         return { ok: false, outcome: 'no-consumer', detail: '找不到名为 "' + by + '" 的消费者，' + kind + ' 没有生效' }
       }
@@ -242,7 +335,7 @@ export function createEngine({ rules, macros, provider, onRecord, now }: EngineO
       }
       return { ok: true, targets: [[by, consumer]] }
     }
-    const targets = [...consumers].filter(([, consumer]) => consumer.kinds.includes(kind))
+    const targets = [...selected].filter(([, consumer]) => consumer.kinds.includes(kind))
     if (targets.length === 0) {
       return { ok: false, outcome: 'no-consumer', detail: '没有消费者接 ' + kind + ' 动作，它没有生效' }
     }
@@ -252,10 +345,17 @@ export function createEngine({ rules, macros, provider, onRecord, now }: EngineO
   /**
    * 跑一轮：把规则作用在一段文本上，把动作交给消费者，留下记录。
    */
-  function run({ surface, ctx = {} }: RunInput = {}): RunOutput {
+  function prepare({ surface, ctx = {}, key = '', rules: inputRules, query, consumers: suppliedConsumers, current: stillCurrent = () => true, onRecord: observe }: RunInput = {}): TextPlan {
     if (typeof surface !== 'object' || surface === null) {
       throw new TypeError('dsh-rule-engine: run expects a surface object')
     }
+    const state = stateFor(key), capturedRevision = state.revision, registrationToken = registrationsRevision
+    const { lastRunAt, seen: seenSurfaces } = state
+    const localConsumers = suppliedConsumers === undefined ? consumers : new Map(suppliedConsumers.map(input => {
+      if (!input.name || !input.kinds || !input.handle) throw new TypeError('text-consumer-invalid')
+      return [input.name, { kinds: [...input.kinds], handle: input.handle }]
+    }))
+    const payloads: DeliveryPayload[] = []
     const current = surface
     const surfaces = ctx.surfaces
     if (surfaces !== undefined && surfaces !== null && !isUnknownArray(surfaces)) {
@@ -264,7 +364,11 @@ export function createEngine({ rules, macros, provider, onRecord, now }: EngineO
     const nowMs = clock()
     const scope: EngineContext & { now: number } = { ...ctx, now: ctx.now ?? nowMs }
     const previous = scope.previous ?? null
-    const rules = currentRules()
+    const checks: (() => boolean)[] = [], previousChecks = compilationChecks
+    compilationChecks = checks
+    let rules: NormalizedRule[]
+    try { rules = (inputRules === undefined ? currentRules(query) : compiledRules(inputRules)).filter(rule => rule.action.kind !== 'sequence') }
+    finally { compilationChecks = previousChecks }
     const byId = new Map(rules.map(rule => [rule.id, rule]))
     const records: EngineRecord[] = []
     const delivered = new Set<string>()
@@ -291,7 +395,7 @@ export function createEngine({ rules, macros, provider, onRecord, now }: EngineO
         }
       }
       // 有没有人接：没人接的规则不生效，只在记录里留一条失效事件。
-      const delivery = planDelivery(rule)
+      const delivery = planDelivery(rule, localConsumers)
       if (!delivery.ok) return { ok: false, outcome: delivery.outcome, detail: delivery.detail }
       plans.set(rule.id, delivery.targets)
       return { ok: true }
@@ -300,56 +404,49 @@ export function createEngine({ rules, macros, provider, onRecord, now }: EngineO
     const { text, hits } = applyRules({ rules, surface: current, ctx: scope, previous, macros, provider, gate })
 
     for (const hit of hits) {
-      const rule = byId.get(hit.ruleId)
-      const record: EngineRecord = {
-        at: nowMs,
-        ruleId: hit.ruleId,
-        kind: hit.kind,
-        placement: hit.placement,
-        outcome: hit.applied ? 'applied' : hit.outcome,
-        detail: hit.detail,
-        loss: hit.loss ?? 0,
-        changed: hit.changed === true,
-      }
-      if (hit.applied) {
-        lastRunAt.set(hit.ruleId, nowMs)
-        if (rule !== undefined && rule.oncePerSurface) rememberSurface(fingerprint(rule, current))
-      }
-      records.push(record)
+      records.push({ at: nowMs, ruleId: hit.ruleId, kind: hit.kind, placement: hit.placement,
+        outcome: hit.applied ? 'applied' : hit.outcome, detail: hit.detail, loss: hit.loss ?? 0, changed: hit.changed === true })
       if (!hit.applied) continue
-
-      const targets = plans.get(hit.ruleId)
-      if (targets === undefined) {
-        // 走到了这里说明 gate 放行了却没算交付方案，是引擎自己的 bug，不能兜底。
-        throw new Error('dsh-rule-engine: internal: applied rule "' + hit.ruleId + '" has no delivery plan')
-      }
-      for (const [name, consumer] of targets) {
-        consumer.handle({
-          ruleId: hit.ruleId,
-          kind: hit.kind,
-          rule,
-          action: hit.action,
-          text,
-          surface: current,
-          ctx: scope,
-          loss: hit.loss ?? 0,
-        })
-        delivered.add(name)
-      }
+      payloads.push({ ruleId: hit.ruleId, kind: hit.kind, rule: byId.get(hit.ruleId), action: hit.action,
+        text, surface: current, ctx: scope, loss: hit.loss ?? 0 })
+      for (const [name] of plans.get(hit.ruleId) ?? []) delivered.add(name)
     }
-
-    if (typeof onRecord === 'function') {
-      for (const record of records) onRecord(record)
-    }
-    return { text, hits, records, delivered: [...delivered] }
+    const result = { text, hits, records, delivered: [...delivered] }
+    let committed = false
+    return { result, payloads, commit() {
+      if (committed) return result
+      if (!stillCurrent() || registrationToken !== registrationsRevision || checks.some(check => !check()) || textState.get(key) !== state || state.revision !== capturedRevision) throw Object.assign(new Error('text-plan-changed-before-commit'), { code: 'CONTROL_CHANGED' })
+      committed = true
+      for (const hit of hits) if (hit.applied) {
+        lastRunAt.set(hit.ruleId, nowMs)
+        if (byId.get(hit.ruleId)?.oncePerSurface) rememberSurface(seenSurfaces, fingerprint({ id: hit.ruleId }, current))
+      }
+      state.revision++
+      for (const payload of payloads) for (const [, consumer] of plans.get(payload.ruleId) ?? []) consumer.handle(payload)
+      for (const record of records) { onRecord?.(record); observe?.(record) }
+      return result
+    } }
   }
+  function run(input: RunInput = {}): RunOutput { return prepare(input).commit() }
 
   return {
+    extensions,
+    compile: compileRule,
+    token,
+    observeCapabilities: extensions.observe,
     /** 当前全部规则（静态 + 来源）。 */
     rules: currentRules,
     provideRules,
     registerConsumer,
     run,
+    prepare,
+    release: key => { textState.delete(key) },
+    detect: (input, query) => detectRulesV2({ ...input, rules: currentRules(query).filter(hasStageRules).filter(rule => rule.enabled) }),
+    // 文档已完成当前会话的准入时，使用该次不可变切面的规则；不混入其他会话文档。
+    plan: input => planStage({ ...input, rules: input.rules ?? currentRules({ sessionId: input.snapshot.session.id, documents: input.documents }).filter(hasStageRules).filter(rule => rule.enabled) }),
+    display: (input, query) => planDisplay({ ...input, rules: input.rules ?? currentRules(query).filter(hasStageRules).filter(rule => rule.enabled) }),
+    displayAsync: (input, execute, signal, query) => planDisplayAsync({ ...input, rules: input.rules ?? currentRules(query).filter(hasStageRules).filter(rule => rule.enabled) }, execute, signal),
+    events: options => createEventRuntime({ ...options, registry: { rules: currentRules, provideSnapshot: (name, produce) => installSource(name, { kind: 'snapshot', produce }), compile: compileRule, extensions, token, observeCapabilities: extensions.observe } }),
     /**
      * surface 指纹的公开算法。
      * 调用方用它把「已经出现过的 surface」存下来，跨进程重启后再传回 ctx.surfaces。

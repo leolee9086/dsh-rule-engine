@@ -2,25 +2,111 @@
 
 DSH 专用的规则引擎：输入「规则集 + 一段上下文」，输出「该做什么」。
 
-引擎不依赖 DSH 运行时，也不依赖任何具体插件：它只认识规则、块、区间和上下文，不碰 Cordis、Session、LLM 这些宿主服务。规则命中后交给关心它的人：
-context_care 负责「通知模型」和「篡改上下文」这两类效果，别的插件也可以听同一条规则去做别的事
-—— 循环输出时，它给模型注入一句「你在重复」，另一个插件在界面上提醒用户。
-`action.by` 指名交给谁；不写就按 kind 广播给所有订阅者。
+引擎拥有规则规范化、条件与计数、块选择、模板、请求与显示规划、动作调度、Worker 生命周期、输出短语检测与反馈触发/回执结算、文档与变量存储策略、控制与冷却，以及事件投递、窗口、sticky 和共享配额算法。它不依赖 Cordis 或 DSH 包；Session 读取、存储实际 I/O、工具审批、原生取消与消息注入通过显式端口提供。库可以持有状态、调度线程和调用这些端口。
 
-`createEngine` 是可选的有状态外壳（规则来源、消费者注册、冷却、命中日志）。不需要这些时直接用
-`applyRules` / `detectRulesV2` 这类函数，它们不持有任何跨调用状态。
+`createEngine` 的同一个来源注册表支持同步文本 `run`、块 `detect`、请求 `plan`、显示 `display` 和事件 `events`。`provideRules(name, produce)` 的来源函数可以按 `RuleQuery.sessionId`、`presetId` 与当前文档切面贡献规则；释放函数只移除自己拥有的贡献。事件来源注册与替换同样进入此注册表，卸载或 runtime 关闭后移除。Host 为当前操作传入已准入的规则切面时，`plan` / `display` 使用该切面，避免混入其它会话。
+
+原有 v1 同步行为保留：按 scope、order 和词法 ID 排序；逐条变换读取前一条结果，保留宏、捕获替换、trim、编辑与深度条件、增量缓存损失预算、冷却、surface 去重和消费者错误语义。`action.by` 指定消费者，省略时按动作 kind 广播。需要无状态调用时，仍可直接使用 `applyRules`、`detectRulesV2`、`planRequest` 与 `planDisplay`。
 
 为什么要有这一层、以及全部讨论记录，见 [2026-09-22-规则引擎设计.md](2026-09-22-规则引擎设计.md)。
 
+## 0.8.0
+
+规则声明由同一个编译入口接入同步文本、块/请求/显示计划与事件交付。字段校验统一使用 Zod 组合 schema，条件叶、布尔语法、阶段动作和接收范围共享定义及错误路径；阶段就绪类型从共同产物派生，`normalizeEventRule` 是阶段入口的别名。原有 provider/model/tool/args/idle/数值/文本事实编译为公共条件节点，`when.condition` 可以使用同一条件树。`Engine.prepare` 返回同步提案，`commit` 在环境 ACK 后确认冷却与 surface 去重；控制、来源或引用能力变更会使旧提案失效。
+
+`transform` 动作在请求/显示副本上顺序执行：后一条读取前一条输出，保留查找宏三种模式、替换宏、捕获/具名捕获、trim、深度和编辑条件。原坐标 `replace`/`filter`/`inject` 先完成基线裁决，顺序变换再读取裁决结果；一次性与增量补丁共用 `createBlockPatchPlan` 的优先级决议和阻塞恢复，正则程序与补丁物化共用 UTF-16 编辑内核；依赖不能倒读后续执行阶段。同步 API 返回原同步结果，Host 可以用 `planRequestAsync` / `planDisplayAsync` 把相同文本计划交给可终止 Worker。
+
+外部包通过 `engine.extensions.registerCondition` / `registerAction` 注册带 `ref`、`revision` 和 `paramsSchema` 的编译能力。声明使用 `{ kind: 'extension', ref, revision, params }`，在交给 Worker 前展开为共同条件/动作，复用已有选择、控制、预算、依赖和 ACK。每个动作扩展产出一个动作，调用方保留动作 ID、阶段与依赖身份；运行期副作用通过执行器端口接入。注册函数返回所属贡献的释放函数，版本替换或卸载使引用它的提案与候选失效，无关扩展保持已有候选。
+
+```sh
+pnpm add @leolee9086/dsh-rule-engine@0.8.0
+```
+
+## 0.6.0
+
+补齐提醒领域职责：通知来源注册、控制时效与去重/冷却、同步通知收集及命中证据、完成措辞解析与原生事实投影、完成提醒的候选/预约/交付、静态与模型切换提示的精确路由、循环裁剪与提醒处置、流式提醒额度，以及请求改写 ACK 后的事务记账均由库实现。
+
+`createNoticeChannel`、`createNoticeRuleRuntime`、`createCompletionFeedback`、`createStreamNoticeActions` 和 `createRequestRewriter` 通过显式端口接入环境。完成事实文本用可迭代块提供，在库内检查长度预算后才拼接；缓存仍由 Host 的共享端口拥有。旧独立调用方的完成观察与出站状态转换也由库提供，生产路径不打开它们的旧侧表。插件继续提供原生 Session 事件解释、切面和 lease、存储 I/O、工具/服务注册、消息创建/注入/取消以及提示文案。
+
+```sh
+pnpm add @leolee9086/dsh-rule-engine@0.6.0
+```
+
+## 0.5.1
+
+修复并行冷检测时重复编译 Ajv 元 schema 耗尽匹配预算的问题。每个 Worker 在 ready 前准备一次编译器；用户 schema 编译和检测仍使用原工作预算，回调仍受原 VM 超时限制。每次编译后清理用户定义，保留独立 `$id` / `$ref`、本地递归、元 schema 别名、严格验证及原 16 项 LRU；不复用检测器回调全局状态。
+
+```sh
+pnpm add @leolee9086/dsh-rule-engine@0.5.1
+```
+
+## 0.5.0
+
+统一规则引擎版本。请求/显示规划、事件运行时、Worker、存储策略、输出反馈及交付恢复均在库内，通过显式环境端口接入。消费方使用标准依赖安装，无需本地源码路径、模块解析钩子或 TypeScript 路径覆盖；原有 v1 同步能力保留。
+
+```sh
+pnpm add @leolee9086/dsh-rule-engine@0.5.0
+```
+
 ## 原生 v2 匹配
 
-`normalizeRuleV2` 校验多动作规则，`detectRulesV2` 返回一次命中的捕获、UTF-16 半开区间及原始块引用。`select.depth` 先按消息、轮次或块计数，再筛选角色与块类型；正文、思考、工具调用与结果可独立选择。执行、模板渲染和状态保存由消费插件负责，引擎本身不产生副作用。
+`normalizeRuleV2` 校验多动作规则，`detectRulesV2` 返回一次命中的捕获、UTF-16 半开区间及原始块引用。`select.depth` 先按消息、轮次或块计数，再筛选角色与块类型；正文、思考、工具调用与结果可独立选择。模板与执行调度在库内实现，实际环境操作由类型化端口执行。`createRuleStore` 在保存 ACK 后发布文档、变量与 runtime 新状态；失败保留旧状态和原始错误。
 
-输出消费方可传 `freshSeq`，同时提供截至该序号的完整历史窗口。跨块正则和关键词优先选择触及当前输出的匹配；只命中历史内容的规则不会认领独占组。返回的 `triggerSeq` 表示实际触发输出，`sourceSeqs` 保留整个检查窗口，不能用窗口里恰好包含新消息来代替触发证据。未传 `freshSeq` 的请求装配匹配保持按窗口选择的行为。原生正则必须由执行宿主放在可终止的 Worker 中运行，以限制回溯耗时。
+输出消费方可传 `freshSeq`，同时提供截至该序号的完整历史窗口。跨块正则和关键词优先选择触及当前输出的匹配；只命中历史内容的规则不会认领独占组。返回的 `triggerSeq` 表示实际触发输出，`sourceSeqs` 保留整个检查窗口，不能用窗口里恰好包含新消息来代替触发证据。未传 `freshSeq` 的请求装配匹配保持按窗口选择的行为。`createBoundedMatcher` 与统一 `runRuleWorker` 在库内运行可终止 Worker，限制正则回溯和判定器耗时；Host 仅提供环境任务与回执。
 
-包入口公开 `V2_STAGES`、`V2_ACTIONS`、`readBinding`、`bindInputs`、`normalizeRuleV2`、`selectBlocksV2`、`matchConditionV2`、`detectRulesV2`、`validateDetectorEvidenceV2` 与 `applyBlockPatchesV2`，保留已有 v1 导出。根正则条件的 `all: true` 返回各次命中的独立捕获与范围（最多 1000 次），零宽匹配按 Unicode 码点前进。外部 detector 的结果通过统一证据校验后参与原生优先级与互斥选择；执行宿主持有 detector 注册、线程、取消和状态，通过 `detectorMatch` 回调向引擎提供匹配证据。
+包入口公开 `V2_STAGES`、`V2_ACTIONS`、`readBinding`、`bindInputs`、`normalizeRuleV2`、`selectBlocksV2`、`matchConditionV2`、`detectRulesV2`、`validateDetectorEvidenceV2` 与 `applyBlockPatchesV2`，保留已有 v1 导出。根正则条件的 `all: true` 返回各次命中的独立捕获与范围（最多 1000 次），零宽匹配按 Unicode 码点前进。外部 detector 的结果通过统一证据校验后参与原生优先级与互斥选择；库的 detector 注册表负责注册、版本、线程、取消和状态；外部 detector 与内建 detector 都经相同证据校验后参与匹配。
 
-v2 的替换区间针对不可变基线，重叠写入按优先级决议。它与旧 `applyRules` 按前一条结果继续替换的顺序语义不同；消费方必须选择对应 API，不混用区间。
+`replace` 的区间针对不可变基线，重叠写入按优先级决议；同一规则计划也支持 `transform` 顺序文本动作。基线补丁保持原坐标，顺序动作读取补丁裁决后的文本，供需要 `foo→bar→baz` 连续变换的规则使用。`applyRules` 的同步顺序合同保留。
+
+## 统一声明与事件交付
+
+`events.connectDocuments(ports)` 接收原生文档文本、根 ID、来源 key、读取/订阅/接收资格端口。引擎拥有 `dsh-rule` YAML/JSON 围栏解码、共同声明校验、来源快照、增量失效、容量重试和撤回；适配插件只处理应用自己的块结构、SQL、推送、凭据和 I/O。输入统一使用 `schemaVersion: 2`，不保留插件格式转换。来源注册只生成一次规范化产物，事件调度和同一 Engine 的同步/块/规划视图复用它；查询不会重新编译扩展。
+
+同步字段、动作、事实和阶段声明的公共类型以及默认值均由对应 schema 推导。`createBlockPatchPlan` 是唯一增量补丁工厂，批处理也使用同一决议算法。
+
+事件规则使用同一个 `schemaVersion: 2` 声明与 `normalizeRule`，正文条件使用统一 `match` 树。`event` 描述工具名、原生事件名、输出模式、时间窗口与真人在场条件；`recipient` 描述接收会话范围。通知动作通过 `delivery.model` 指定 surface/window 去重、sticky、共享配额或显式中断，工具拒绝通过执行前动作的 `deny: { dangerous: true, reason }` 声明。
+
+```js
+const engine = createEngine()
+const events = engine.events({
+  execute: (work, signal, timing) => matcher.detect(work, signal, timing),
+  templates: createTemplates(),
+  resolveIdentity: sessionId => readCurrentSessionIdentity(sessionId),
+  updateClaims: change => serializedNativeClaimsUpdate(change),
+})
+const source = events.registerSource({
+  sourceId: 'example', plugin: 'example-plugin', revision: 1,
+  rules: [{ schemaVersion: 2, sourceId: 'example', id: 'read-check', revision: 1,
+    on: ['tool.succeeded'],
+    select: { view: 'original', roles: ['tool'], blockTypes: ['tool-result'] },
+    match: { kind: 'always' }, event: { tool: 'read' },
+    actions: [{ id: 'model', kind: 'notify', stage: 'tool.succeeded', enabledDefault: true,
+      template: '核对实际读取结果。', delivery: { model: { once: 'surface' } } }],
+  }],
+})
+// 环境提交已观察到的事实，在自然请求边界收集并通过正常消息队列交付。
+await events.submit({ sessionId: 'session-a', callId: 'read-1', rootCallId: 'read-1', name: 'read' })
+const messages = await events.collect({ sessionId: 'session-a', visible: [] })
+await source.dispose()
+await events.close()
+```
+
+同一规则的条件与 judge 每轮只评估一次，各动作仍保留自己的身份、依赖、开关、候选、回滚、冷却和配额。动作 `cooldownMs` 从本次激活起计，时钟随真实 inbox 交接恢复，revision 参与动作时钟身份；sticky 的既有续投不被新激活冷却打断。只有声明冷却的事件动作额外读取时钟投影。独占组选择规则后允许该规则的全部适用动作；依赖动作按库内稳定拓扑顺序执行。`eligible` 端口提供实时控制，未提供时使用规则与动作的默认启用状态。
+
+事件运行时只接受当前引擎声明，不执行 `reminder/v1` 至 `reminder/v4`。`recordedDelivery`、`applyDeliveryFact` 和 `recordDeliveryClaim` 仅读取原生已交付消息中的参数作为事实，保留实际消费、窗口与 sticky 计数；不会把历史声明改造成可执行规则。默认 `model` 的已发布配额与窗口键保持不变，其它动作使用自己的动作 ID。Session inbox 已接纳的消息保留原 ID、冻结正文、签名与控制代次；候选侧文件不是生产恢复依据。
+
+交付事务同样由库编排：
+
+- `createClaimRuntime` 通过原生日志/inbox 端口串行恢复跨会话配额账本，只释放已取消的预约；实际提交的消费不能被回滚撤销，失败变更不发布。
+- `createDeliveryRuntime` 在 Host 的缓存端口内恢复交付时钟、queued 输入和带序号的 handoff 回执。完整恢复与轻量 queued 视图共用 `applyQueuedDeliveryFact`；原生切面、lease 和缓存代际仍由 Host 管理。
+- `collectDeliveryInputs` 负责请求前评估、收集与原位替换冻结输入；`filterDeliveryMessages` 在每次回滚后重验，并可用同步 `commit` 端口把最终决定直接交给环境；`handoffQueuedDelivery` 在最后重验后同步调用发布端口。
+- `SnoozeWindow`、`SnoozeResult`、`snoozeResultSchema` 与 `readSnoozeResult` 定义保留事实；工具注册、正文/元数据承载与本地化文字由环境提供。上下文截断共用 `requestContext`。
+
+## 缓存与环境职责
+
+Host 的共享 SessionCache 持有原生 Session、冷读取合并、替换代数和不可变切面。库的 `createRequestPlanCache`、`createDisplayPlanCache`、模型正文/工具配对投影、块/动作索引通过 `PlanningCachePort` 使用这份缓存，操作关闭时清除自己的域；库不再创建第二份 Session 缓存。请求字节比较保留完整 public JSON 的字段顺序，变量 CAS 也保留读取时的原始 JSON 字段顺序。请求写入拥有独立副本，历史切面不随新事件增长。
+
+库不导入 DSH、不打开其 Session 文件，也不持有 Agent。环境负责把原生事件/流帧映射成库输入，把批准的工具、实际持久化和消息交付接到端口，HTTP 与 UI 留在消费插件。
 
 ## 用法
 
@@ -191,6 +277,16 @@ plan.exceedsBudget   // 必须做的那些本身就已经超预算 —— 调用
 
 `required: true` 是给隐私清洗这类「做了才能发」的变换用的：无条件接受，代价照算，
 超预算时由调用方决定拒绝发送。而一般的超预算，做不做由人定（走批准）。
+
+## 0.7.0 接入契约
+
+`createEventRuntime(options)` 与 `engine.events(options)` 必须显式提供 `saveCapacity`、`changed`、`report` 和 `sinceSeq`。独立持久化模式还必须提供 `save`；`sessionAuthoritative: true` 由 Session 日志恢复，允许省略旧候选状态写入器。漏接端口在创建时抛出具体错误，不能以空 ACK、丢弃诊断或默认扫描边界继续运行。没有政策重置的独立环境须显式提供 `sinceSeq: () => -1`；测试环境自行提供内存写入器。
+
+首次启动没有恢复记录时可以省略 `entries`；没有原生事件目录的独立环境可以省略 `catalog`。这两项表示合法的空输入。DSH 的原生适配器负责传入由发布 schema 自动生成的事件目录。
+
+`EventFieldShape` 只定义在自动生成模块 `src/generated/event-field-shape.ts`，由 `pnpm generate:types` 生成并通过公共入口导出。引擎 selector 和原生目录生成器均使用这一个类型，环境目录只生成事件名与载荷，不再生成第二份类型。`pnpm build` 先检查生成产物是否过期；`pnpm check` 还以原严格 TS 配置核对必填端口的公开声明。
+
+插件调用方直接从本库导入公共能力；原生适配器只暴露其实际封装的能力，不转发库 API。
 
 ## 引擎管的是生命周期
 

@@ -6,7 +6,8 @@
  */
 
 import { matchRule, type MatchContext } from './match.js'
-import { runRegexScript, defaultRegexProvider, type RegexProvider } from './regex.js'
+import { defaultRegexProvider, type RegexProvider } from './regex.js'
+import { transformText } from './text-transform.js'
 import { cacheLossRatio } from './budget.js'
 import type { Gate, Hit, Macros, NormalizedRule, Surface } from './types.js'
 
@@ -59,6 +60,9 @@ export function applyRules({ rules, surface, ctx = {}, previous = null, macros, 
   let text = baseline
   const hits: Hit[] = []
   for (const rule of rules) {
+    // 同步文本路径只接声明过的单动作，多动作在同一引擎的阶段路径执行。
+    const action = rule.action
+    if (action.kind === 'sequence') continue
     const current: Surface = { ...surface, text }
     const verdict = matchRule(rule, current, ctx, { provider, macros })
     if (!verdict.ok) continue
@@ -71,7 +75,7 @@ export function applyRules({ rules, surface, ctx = {}, previous = null, macros, 
         if (!allowed.ok) {
           hits.push({
             ruleId: rule.id,
-            kind: rule.action.kind,
+            kind: action.kind,
             placement: surface.placement,
             applied: false,
             outcome: allowed.outcome,
@@ -81,8 +85,8 @@ export function applyRules({ rules, surface, ctx = {}, previous = null, macros, 
         }
       }
     }
-    if (rule.action.kind === 'transform') {
-      const next = runRegexScript(rule.when, text, macros === undefined ? { provider } : { macros, provider })
+    if (action.kind === 'transform') {
+      const next = transformText(rule.when, text, macros, provider, true).text
       // 代价按「这条规则自己造成的增量」算：前面几条已经改过的地方不该重复计入。
       const loss = cacheLossRatio(previous, baseline, next) - cacheLossRatio(previous, baseline, text)
       const budget = rule.budget
@@ -95,7 +99,7 @@ export function applyRules({ rules, surface, ctx = {}, previous = null, macros, 
           outcome: 'over-budget',
           detail: '这条规则要废掉 ' + (loss * 100).toFixed(2) + '% 的缓存，超过它自己的预算 ' + (budget.maxCacheLoss * 100).toFixed(2) + '%',
           loss,
-          action: rule.action,
+          action: action,
         })
         continue
       }
@@ -106,7 +110,7 @@ export function applyRules({ rules, surface, ctx = {}, previous = null, macros, 
         applied: true,
         changed: next !== text,
         loss,
-        action: rule.action,
+        action: action,
       })
       text = next
     } else {
@@ -117,7 +121,7 @@ export function applyRules({ rules, surface, ctx = {}, previous = null, macros, 
         applied: true,
         changed: false,
         loss: 0,
-        action: rule.action,
+        action: action,
       })
     }
   }

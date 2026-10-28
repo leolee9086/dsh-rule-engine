@@ -98,7 +98,7 @@ test('actions reject ignored fields, cross-stage dependencies and unpaired resum
 
 test('cyclic and unknown dependencies fail at normalization', () => {
   assert.throws(() => rule({ kind: 'always' }, { actions: [{ id: 'a', kind: 'abort', stage: 'request.assemble', enabledDefault: true, dependsOn: ['a'] }] }), /cyclic/)
-  assert.throws(() => rule({ kind: 'always' }, { unknown: true }), /unknown rule/)
+  assert.throws(() => rule({ kind: 'always' }, { unknown: true }), /unknown field unknown/)
 })
 
 test('all regex occurrences keep independent captures, Unicode zero widths and bounded evidence', () => {

@@ -1,0 +1,6 @@
+{
+  "name": "rule-engine-contract-extension",
+  "private": true,
+  "type": "module",
+  "exports": "./index.js"
+}
