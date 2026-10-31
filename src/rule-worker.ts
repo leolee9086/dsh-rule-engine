@@ -4,16 +4,23 @@ import { detectRulesV2, normalizeRuleV2, type V2Block } from './block-rules.js'
 import { createWorkerDetectors } from './detector-worker.js'
 import { progressWriter } from './matcher-progress.js'
 import { executeEventMatch, executeEventBatch } from './event-matcher.js'
+import { compileInline } from './inline-call.js'
 import { Detector, Event } from './event-state.js'
 const Analysis = z.object({ analyzer: Detector, event: Event, maxBytes: z.number().int().positive() }).strict()
 const Facts = z.record(z.string(), z.json())
 export async function executeEventAnalysis(raw: unknown) {
   const { analyzer, event, maxBytes } = Analysis.parse(raw)
-  const loaded: unknown = await import(analyzer.module)
-  if (!isRecord(loaded) || typeof loaded[analyzer.exportName] !== 'function') throw new Error('reminder-analyzer-export-missing')
-  const evaluate = loaded[analyzer.exportName]
+  const context = event.context ?? { messages: [], truncated: false }
+  // 两条通路：源码随声明走（内联编译），模块按 URL 加载。不互相转换。
+  let evaluate: unknown
+  if ('code' in analyzer) evaluate = compileInline(analyzer.code)
+  else {
+    const loaded: unknown = await import(analyzer.module)
+    if (!isRecord(loaded)) throw new Error('reminder-analyzer-export-missing')
+    evaluate = loaded[analyzer.exportName]
+  }
   if (typeof evaluate !== 'function') throw new Error('reminder-analyzer-export-missing')
-  const facts = Facts.parse(await evaluate({ event, context: event.context ?? { messages: [], truncated: false } }))
+  const facts = Facts.parse(await evaluate({ event, context }))
   if (Buffer.byteLength(JSON.stringify(facts)) > maxBytes) throw new Error('reminder-analysis-budget-exceeded')
   return facts
 }
@@ -24,12 +31,14 @@ import type { DetectorStates, DetectorSpecification } from './detector-protocol.
 
 const Specification = z.object({ plugin: z.string(), ref: z.string(), revision: z.number(), sessionId: z.string().optional(), on: z.array(z.string()),
   paramsSchema: z.unknown(), stateSchema: z.unknown(), resultSchema: z.unknown(), timeoutMs: z.number(), maxStateBytes: z.number(), maxResultBytes: z.number(),
-  builtin: z.string().optional(), callbacks: z.object({ initialize: z.string(), feed: z.string(), finalize: z.string(), reset: z.string() }).optional() }).strict()
+  builtin: z.string().optional(), workerCallbacks: z.object({ initialize: z.string(), feed: z.string(), finalize: z.string(), reset: z.string() }).optional() }).strict()
 const Held = z.object({ state: z.unknown(), offset: z.number(), params: z.unknown(), blockKey: z.unknown().optional() }).strict()
 const Block = z.object({ id: z.string(), view: z.string(), role: z.string(), type: z.string(), text: z.string().optional(), seq: z.number().optional(),
   messageId: z.string().optional(), messageIndex: z.number().optional(), turnId: z.string().optional() }).catchall(z.unknown())
+// 宿主通路决出的独占组：只带判定必需的排序键，不带规则本身。
+const Blocked = z.object({ group: z.string(), after: z.object({ scope: z.number(), order: z.number(), sourceId: z.string().optional(), id: z.string() }).strict() }).strict()
 const Input = z.object({ rules: z.array(z.unknown()).default([]), blocks: z.array(Block).default([]), stage: z.string().default('raw.observe'),
-  vars: z.record(z.string(), z.unknown()).optional(), session: z.record(z.string(), z.unknown()).optional(),
+  vars: z.record(z.string(), z.unknown()).optional(), session: z.record(z.string(), z.unknown()).optional(), blockedGroups: z.array(Blocked).optional(),
   detectorSpecifications: z.array(Specification).optional(), detectorStates: z.record(z.string(), Held).optional(), detectorReset: z.string().optional(), freshSeq: z.number().optional() }).catchall(z.unknown())
 export function executeRuleTask(raw: unknown, context?: RuleWorkerContext): unknown {
   if (isRecord(raw)) {

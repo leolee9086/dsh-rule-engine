@@ -7,7 +7,10 @@ import { isRecord, isUnknownArray } from './guard.js'
 export { applyBlockPatches as applyBlockPatchesV2 } from './display-patch-plan.js'
 import type { NormalizedRule } from './types.js'
 import type { StageFields, StageFieldsSchema } from './stage-schema.js'
-import { normalizeRule, compareRules } from './rules.js'
+import { normalizeRule, compareRules, ruleOrderKey, compareRuleOrderKey } from './rules.js'
+import type { RuleOrderKey } from './rules.js'
+// 排序键也是跨通路（宿主进程 → Worker）的入参，公开类型从这里出去。
+export type { RuleOrderKey } from './rules.js'
 import { measureCondition } from './count-condition.js'
 import { TextSamples, type TextSampleValue } from './count-condition.js'
 import type { TextCountResult, MatchTruth } from './text-count.js'
@@ -169,6 +172,13 @@ export interface RuleEvent {
   facts: Record<string, unknown>
 }
 
+/** 另一个通路已经决出的独占组。 */
+export interface BlockedGroup {
+  group: string
+  /** 决出这个组的规则排序键：本趟只跳过排在它后面的规则，前面的照旧参与。 */
+  after: RuleOrderKey
+}
+
 /** detectRulesV2 的入参。 */
 export interface DetectInput {
   rules: readonly NormalizedRuleV2[]
@@ -177,6 +187,14 @@ export interface DetectInput {
   snapshot?: Record<string, unknown>
   freshSeq?: number
   maxMatches?: number
+  /**
+   * 已在别的通路（宿主侧）决出的独占组。
+   *
+   * 两条通路各自排自己的序，但先后只有一个口径：传决出者的排序键，本趟就能按同一份
+   * 顺序算出谁该被跳过。只给组名做不到这一点——那样低优先级的宿主规则会挡住高优先级的
+   * Worker 规则。
+   */
+  blockedGroups?: readonly BlockedGroup[]
   detectorMatch?: (rule: NormalizedRuleV2, context: ConditionSnapshot) => unknown
 }
 
@@ -385,16 +403,24 @@ export function selectBlocksV2<B extends V2Block>(blocks: readonly B[], select: 
 }
 
 /** One event per selected block, shared by every action. freshSeq restricts triggers before exclusive groups are claimed; sourceSeqs retain the complete inspected window. */
-export function detectRulesV2({ rules, blocks, stage, snapshot, freshSeq, maxMatches = 1000, detectorMatch }: DetectInput): RuleEvent[] {
+export function detectRulesV2({ rules, blocks, stage, snapshot, freshSeq, maxMatches = 1000, blockedGroups, detectorMatch }: DetectInput): RuleEvent[] {
   if (freshSeq !== undefined) parseInput(z.number().int().nonnegative(), freshSeq, 'freshSeq')
   const base: Record<string, unknown> = snapshot ?? {}
   const blockSurface = indexBlockSurfaces(blocks)
   const events: RuleEvent[] = []
-  const exclusive = new Set<string>()
+  // 独占组记的是「决出它的那条规则的排序键」，不是布尔标记：两条通路合流时，
+  // 排在决出者前面（优先级更高）的规则仍要参与。
+  const exclusive = new Map<string, RuleOrderKey>()
+  for (const { group, after } of blockedGroups ?? []) {
+    const previous = exclusive.get(group)
+    if (previous === undefined || compareRuleOrderKey(after, previous) < 0) exclusive.set(group, after)
+  }
   const sorted = [...rules].sort(compareRules)
   for (const rule of sorted) {
     if (!rule.on.includes(stage)) continue
-    if (rule.exclusiveGroup !== undefined && exclusive.has(rule.exclusiveGroup)) continue
+    const order = ruleOrderKey(rule)
+    const decided = rule.exclusiveGroup === undefined ? undefined : exclusive.get(rule.exclusiveGroup)
+    if (decided !== undefined && compareRuleOrderKey(order, decided) > 0) continue
     let selected = selectBlocksV2(blocks, rule.select)
     if (rule.select.includeCurrent === false) selected = selected.filter(block => block.seq !== base.currentSeq)
     if (rule.select.crossBlock === true && selected.length) {
@@ -449,7 +475,7 @@ export function detectRulesV2({ rules, blocks, stage, snapshot, freshSeq, maxMat
         if (events.length > maxMatches) throw new Error('rules-v2: match budget exceeded')
       }
     }
-    if (matched && rule.exclusiveGroup !== undefined) exclusive.add(rule.exclusiveGroup)
+    if (matched && rule.exclusiveGroup !== undefined) exclusive.set(rule.exclusiveGroup, order)
   }
   return events
 }

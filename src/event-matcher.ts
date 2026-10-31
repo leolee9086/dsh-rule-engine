@@ -1,14 +1,25 @@
 import { z } from 'zod'
 import { parseSnapshotCondition, CountLimits, evaluateSnapshotCondition, type SnapshotMatch, type TextSampleValue } from './snapshot-conditions.js'
 import { Event, Detector, errorMessage } from './event-state.js'
+import { describeHit, detectDegradation } from './loop-patterns.js'
+import { compileInline, stateOf } from './inline-call.js'
 import { serializeWorkerError } from './worker-error.js'
 import type { ExecutionCheckpoint } from './matcher-progress.js'
 
 // Reuse the validator, not parsed values: every event/result still gets the
 // same JSON validation, without constructing a recursive schema per rule.
 const Json = z.json()
+/**
+ * 规则自带的判定器：一段函数表达式源码。
+ *
+ * 与 `Detector`（外部模块或源码）并存——这里要的是「写规则的人随手写一个判断」，
+ * 能力与状态全从 `ctx` 取（art-template 的路子），编译在 `inline-call.ts`。
+ */
+const InlineJudge = z.object({ code: z.string().min(1).max(65536) }).strict()
+const Judge = z.union([Detector, InlineJudge])
+type JudgeSpec = z.infer<typeof Judge>
 const Input = z.object({ condition: z.unknown(), event: Event, maxBytes: z.number().int().positive(),
-  countLimits: CountLimits, judge: Detector.optional(), params: z.json().optional() }).strict()
+  countLimits: CountLimits, judge: Judge.optional(), params: z.json().optional() }).strict()
 const Judged = z.object({ ok: z.boolean(), facts: z.record(z.string(), z.json()).optional() }).catchall(z.json())
 const moduleRecord = (value: unknown): value is Record<string, unknown> => value !== null && typeof value === 'object'
 type Matched = SnapshotMatch & { facts?: Record<string, unknown> }
@@ -18,12 +29,15 @@ const Batch = z.object({
   /** Remaining evaluation time, excluding startup, queues and Host storage. */
   budgetMs: z.number().nonnegative().optional(),
   blockedGroups: z.array(z.string()).optional(),
-  rules: z.array(z.object({ key: z.string().min(1), condition: z.unknown(), judge: Detector.optional(), params: z.json().optional(),
+  rules: z.array(z.object({ key: z.string().min(1), condition: z.unknown(), judge: Judge.optional(), params: z.json().optional(),
     timeoutMs: z.number().nonnegative().optional(), exclusiveGroup: z.string().optional(), error: Failure.optional() }).strict()).max(2048),
 }).strict()
 export type BatchItem = { key: string; ms: number; match: Matched } | { key: string; ms: number; error: { name: string; message: string } }
 export interface BatchResult { items: BatchItem[]; stopped: boolean; elapsedMs: number }
 const snapshotOf = (event: z.infer<typeof Event>) => Json.parse({ event, tool: event, facts: event.facts, context: event.context ?? {} })
+
+/** 判定器能用的能力只从这里给：拿不到模块、拿不到引擎内部状态。 */
+const helpers = Object.freeze({ detectDegradation, describeHit })
 
 export async function executeEventMatch(raw: unknown) {
   const input = Input.parse(raw)
@@ -67,16 +81,22 @@ export async function executeEventBatch(raw: unknown, onItem?: (item: BatchItem)
   return { items, stopped, elapsedMs }
 }
 
-async function matchOf(event: z.infer<typeof Event>, raw: unknown, snapshot: z.infer<typeof Json>,
-  limits: z.infer<typeof CountLimits>, judge?: z.infer<typeof Detector>, params?: unknown): Promise<Matched> {
-  // Validate cloned data and clamp its ceilings before it can select a judge.
-  const matched = evaluateSnapshotCondition(parseSnapshotCondition(raw, limits), snapshot, event.textSamples ?? [])
-  if (matched.status !== 'matched' || judge === undefined) return matched
+/** 判定器执行：内联源码与外部模块共用同一份 ctx 契约。 */
+async function runJudge(judge: JudgeSpec, event: z.infer<typeof Event>, params: unknown): Promise<z.infer<typeof Judged>> {
+  if ('code' in judge) return Judged.parse(await compileInline(judge.code)({ event, params, state: stateOf(judge.code), helpers, random: Math.random }))
   const loaded: unknown = await import(judge.module)
   if (!moduleRecord(loaded)) throw new Error('reminder-judge-export-missing')
   const evaluate = loaded[judge.exportName]
   if (typeof evaluate !== 'function') throw new Error('reminder-judge-export-missing')
-  const result = Judged.parse(await evaluate({ event, params }))
+  return Judged.parse(await evaluate({ event, params }))
+}
+
+async function matchOf(event: z.infer<typeof Event>, raw: unknown, snapshot: z.infer<typeof Json>,
+  limits: z.infer<typeof CountLimits>, judge?: JudgeSpec, params?: unknown): Promise<Matched> {
+  // Validate cloned data and clamp its ceilings before it can select a judge.
+  const matched = evaluateSnapshotCondition(parseSnapshotCondition(raw, limits), snapshot, event.textSamples ?? [])
+  if (matched.status !== 'matched' || judge === undefined) return matched
+  const result = await runJudge(judge, event, params)
   return { ...matched, ok: result.ok, status: result.ok ? 'matched' : 'unmatched', facts: result.facts ?? {} }
 }
 

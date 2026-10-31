@@ -164,22 +164,45 @@ function checkWhen(raw: unknown, id: string, options: NormalizeOptions): RuleWhe
 }
 
 /**
+ * 规则的排序键。
+ *
+ * 检测器分两条通路执行（宿主进程 / Worker），两条通路各自排完序以后还要合成一次，
+ * 所以「谁先谁后」必须能跨进程传递——只传这份键，不传整条规则。
+ */
+export interface RuleOrderKey {
+  /** 作用域优先级。 */
+  scope: number
+  /** 已换算成升序的排序值：阶段规则取负 priority，v1 取 order。 */
+  order: number
+  /** v2 规则的来源；v1 规则没有来源，退回按 ID 比较。 */
+  sourceId?: string
+  id: string
+}
+/** 取出规则的排序键；与 compareRules 的比较口径完全一致。 */
+export function ruleOrderKey(rule: NormalizedRule): RuleOrderKey {
+  // 阶段规则的公开 priority 可由调用方更新；排序不能复用归一化时的旧 order。
+  const order = rule.schemaVersion === 2 ? -(rule.priority ?? 0) : rule.order
+  return rule.schemaVersion === 2
+    ? { scope: rule.scope, order, sourceId: rule.sourceId, id: rule.id }
+    : { scope: rule.scope, order, id: rule.id }
+}
+/**
  * 按优先级排序。
  *
  * 优先级 = 作用域优先级 + order，两部分都写在规则里 —— 照搬酒馆的
  * 「ORDER MATTERS: defines the regex script priority」，但去掉酒馆用来兜底的
  * 「列表内顺序」。
  */
-export function compareRules(a: NormalizedRule, b: NormalizedRule): number {
+export function compareRuleOrderKey(a: RuleOrderKey, b: RuleOrderKey): number {
   if (a.scope !== b.scope) return a.scope - b.scope
-  // 阶段规则的公开 priority 可由调用方更新；排序不能复用归一化时的旧 order。
-  const left = a.schemaVersion === 2 ? -(a.priority ?? 0) : a.order
-  const right = b.schemaVersion === 2 ? -(b.priority ?? 0) : b.order
-  if (left !== right) return left - right
+  if (a.order !== b.order) return a.order - b.order
   // 早期阶段声明的同优先级以来源和本地 ID 定序；v1 的词法 ID 比较保持原样。
-  if (a.schemaVersion === 2 && b.schemaVersion === 2) return (a.sourceId ?? '').localeCompare(b.sourceId ?? '') || a.id.localeCompare(b.id)
+  if (a.sourceId !== undefined && b.sourceId !== undefined) return a.sourceId.localeCompare(b.sourceId) || a.id.localeCompare(b.id)
   if (a.id === b.id) return 0
   return a.id < b.id ? -1 : 1
+}
+export function compareRules(a: NormalizedRule, b: NormalizedRule): number {
+  return compareRuleOrderKey(ruleOrderKey(a), ruleOrderKey(b))
 }
 export function sortRules<T extends NormalizedRule>(rules: readonly T[]): T[] {
   return [...rules].sort(compareRules)

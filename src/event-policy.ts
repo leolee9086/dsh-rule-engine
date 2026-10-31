@@ -21,7 +21,11 @@ export const EventSelector = z.object({ tool: Id.optional(), arguments: z.record
 }).strict()
 export type EventSelection = z.infer<typeof EventSelector>
 export type EventSelectionInput = z.input<typeof EventSelector>
-export const RuleJudge = z.object({ ref: Id, revision: z.number().int().positive(), params: z.json().optional(), timeoutMs: z.number().int().min(1).max(60000).optional() }).strict()
+/** 判定器二选一：`code` 是规则自带的函数表达式字符串（能力与状态都走 ctx），`ref` 是注册表里的具名判定器。 */
+export const RuleJudge = z.union([
+  z.object({ code: z.string().min(1).max(65536), params: z.json().optional(), timeoutMs: z.number().int().min(1).max(60000).optional() }).strict(),
+  z.object({ ref: Id, revision: z.number().int().positive(), params: z.json().optional(), timeoutMs: z.number().int().min(1).max(60000).optional() }).strict(),
+])
 const SharedQuota = z.discriminatedUnion('reset', [
   z.object({ reset: z.literal('lifetime'), lifetime: Id, limit: z.number().int().min(1).max(10000) }).strict(),
   z.object({ reset: z.literal('window'), limit: z.number().int().min(1).max(10000) }).strict(),

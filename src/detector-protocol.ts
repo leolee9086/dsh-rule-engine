@@ -56,17 +56,33 @@ export function validateDetectorValue(validate: ValidateFunction<unknown>, value
   if (!validate(value)) throw new Error(`detector-${label}-schema-invalid`)
   return value
 }
-export function detectorCallbackSource(callback: unknown): string {
-  if (typeof callback !== 'function' || callback.constructor?.name !== 'Function') throw new Error('detector-callback-must-be-synchronous-function')
-  let source = Function.prototype.toString.call(callback)
-  if (source.length > 65536) throw new Error('detector-callback-source-budget-exceeded')
-  try { new Script(`(${source})`) } catch {
-    source = `function ${source}`
-    try { new Script(`(${source})`) } catch { throw new Error('detector-callback-source-invalid') }
-  }
+export type DetectorCallbackName = 'initialize' | 'feed' | 'finalize' | 'reset'
+/**
+ * 宿主进程回调：真正的函数对象，在本进程直接调用。
+ *
+ * 与 Worker 通路互斥。函数不序列化、不转源码——它就在宿主里跑，
+ * 代价是失去 Worker 的隔离与超时保护，由注册者自己保证不写死循环。
+ */
+export type HostCallbacks = Record<DetectorCallbackName, (input: Record<string, unknown>) => unknown>
+/**
+ * Worker 进程回调：源码字符串，序列化后进 Worker 编译执行。
+ *
+ * 函数对象过不了进程边界，所以这条通路在接口上就要求源码：
+ * 注册者必须知道自己的代码会在另一侧被重新编译。
+ */
+export type WorkerCallbacks = Record<DetectorCallbackName, string>
+/** Worker 通路的源码校验：必须是可求值的函数表达式，长度受限。 */
+export function detectorCode(source: unknown, name: DetectorCallbackName): string {
+  if (typeof source !== 'string' || !source) throw new Error(`detector-code-required:${name}`)
+  if (source.length > 65536) throw new Error('detector-code-budget-exceeded')
+  try { new Script(`(${source})`) } catch { throw new Error('detector-code-invalid') }
   return source
 }
-export type DetectorCallbackName = 'initialize' | 'feed' | 'finalize' | 'reset'
+/** 宿主通路注册时只收同步函数：异步回调无法在当前匹配回合内返回结果。 */
+export function detectorHostCallback(callback: unknown, name: DetectorCallbackName): (input: Record<string, unknown>) => unknown {
+  if (typeof callback !== 'function' || callback.constructor?.name !== 'Function') throw new Error(`detector-host-callback-must-be-synchronous:${name}`)
+  return input => Reflect.apply(callback, undefined, [input])
+}
 export interface DetectorSpecification {
   plugin: string
   ref: string
@@ -80,7 +96,10 @@ export interface DetectorSpecification {
   maxStateBytes: number
   maxResultBytes: number
   builtin?: string
-  callbacks?: Record<DetectorCallbackName, string>
+  /** 宿主通路：函数在本进程直接调用。不进 Worker，不参与序列化。 */
+  hostCallbacks?: HostCallbacks
+  /** Worker 通路：源码字符串，进 Worker 编译执行。 */
+  workerCallbacks?: WorkerCallbacks
 }
 export interface DetectorHeldState { state: unknown; offset: number; params: unknown; blockKey?: unknown }
 export type DetectorStates = Record<string, DetectorHeldState>

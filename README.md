@@ -10,6 +10,18 @@ DSH 专用的规则引擎：输入「规则集 + 一段上下文」，输出「�
 
 为什么要有这一层、以及全部讨论记录，见 [2026-09-22-规则引擎设计.md](2026-09-22-规则引擎设计.md)。
 
+## 0.9.0
+
+检测器的回调拆成两条互斥的通路。`hostCallbacks` 交真实函数，在主进程直接调用，不序列化、可以带闭包，代价是没有 Worker 的隔离与超时；`workerCallbacks` 交源码字符串，在 Worker 的 vm 里重新编译执行，有隔离和超时。两条通路共用同一套 `initialize` / `feed` / `finalize` / `reset` 生命周期，以及 params、state、result 的 JSON 与 schema 校验，只差回调从哪里来。注册时二选一：两条都给、两条都不给都直接失败。
+
+非检测器规则（含不受控正则）始终进 Worker，不会因为旁边挂了宿主检测器就搬到主线程。两条通路各自排序、各自执行，独占组由同一份全局顺序决出唯一的赢家；落败一方的事件丢弃。
+
+规则可以自带内联判定器（`judge.code`）：一段函数表达式源码，引擎编译后执行，同步异步都行，能力只从 ctx 取。
+
+```sh
+pnpm add @leolee9086/dsh-rule-engine@0.9.0
+```
+
 ## 0.8.0
 
 规则声明由同一个编译入口接入同步文本、块/请求/显示计划与事件交付。字段校验统一使用 Zod 组合 schema，条件叶、布尔语法、阶段动作和接收范围共享定义及错误路径；阶段就绪类型从共同产物派生，`normalizeEventRule` 是阶段入口的别名。原有 provider/model/tool/args/idle/数值/文本事实编译为公共条件节点，`when.condition` 可以使用同一条件树。`Engine.prepare` 返回同步提案，`commit` 在环境 ACK 后确认冷却与 surface 去重；控制、来源或引用能力变更会使旧提案失效。
@@ -101,6 +113,82 @@ await events.close()
 - `createDeliveryRuntime` 在 Host 的缓存端口内恢复交付时钟、queued 输入和带序号的 handoff 回执。完整恢复与轻量 queued 视图共用 `applyQueuedDeliveryFact`；原生切面、lease 和缓存代际仍由 Host 管理。
 - `collectDeliveryInputs` 负责请求前评估、收集与原位替换冻结输入；`filterDeliveryMessages` 在每次回滚后重验，并可用同步 `commit` 端口把最终决定直接交给环境；`handoffQueuedDelivery` 在最后重验后同步调用发布端口。
 - `SnoozeWindow`、`SnoozeResult`、`snoozeResultSchema` 与 `readSnoozeResult` 定义保留事实；工具注册、正文/元数据承载与本地化文字由环境提供。上下文截断共用 `requestContext`。
+
+## 判定器：规则自带的代码
+
+条件树只能写固定形状，判断不了「这段输出刷屏了没」这种要算的事。`judge` 就是给这种场合的：规则里直接写一段函数表达式，引擎编译成函数执行，返回 `{ ok }` 决定这一条命中不命中。
+
+```yaml
+judge:
+  params: { probability: 0.3, maxPerSurface: 2, key: read-partial }
+  code: |
+    ({ event, params, state, random }) => {
+      const key = `${params.key}|${event.triggerSeq}`
+      const used = state.get(key) ?? 0
+      if (used >= params.maxPerSurface) return { ok: false }
+      if (random() >= params.probability) return { ok: false }
+      state.set(key, used + 1)
+      return { ok: true }
+    }
+  timeoutMs: 250
+```
+
+- `code` 必须是函数表达式；同步、异步都行（返回 Promise 会被 await）。
+- **没有闭包**：源码独立编译，外部变量一律走 ctx。
+- ctx 五个字段：`event`（事件事实）、`params`（规则里的 params）、`state`（`Map`）、`helpers`（`detectDegradation` / `describeHit`）、`random`。
+- `state` 同一段源码共享一份，在 Worker 存活期间持续，回收即清零，不落盘；源码改一个字就重新编译、state 重来。
+- 编译失败、返回形状不对、超时，都只让这一条规则在本次评估里报错，其它规则照常。
+- 写法上注意：源码包在 `(` `)` 里执行，末尾带行注释也不影响外壳（引擎已换行包裹，有测试盖）。
+
+与 `judge.ref` 的分工：`ref` 指向脚本安装时注册的具名判定器（跨插件共用）；`code` 随规则走，写规则的人在笔记里改完就生效。
+
+## 检测器：两条回调通路
+
+规则的条件树写不了「把这段流慢慢啃一遍」这种活儿，`match: { kind: 'detector' }` 就是给它的：插件注册一个检测器，规则只写引用、版本和参数。回调有四件套：`initialize` 起状态，`feed` 吃一段增量并给出证据，`finalize` 收尾，`reset` 交出干净状态。
+
+回调放在哪执行，由注册时选哪条通路决定：
+
+```js
+// 宿主通路：真实函数，就在本进程跑。可以用闭包，但没有超时和隔离。
+registry.register({
+  plugin: 'my-plugin', ref: 'my:counter', revision: 1, on: ['output.delta'],
+  paramsSchema: { type: 'object', properties: { token: { type: 'string' } }, required: ['token'] },
+  stateSchema: { type: 'object', properties: { text: { type: 'string' } }, required: ['text'] },
+  resultSchema: {},
+  hostCallbacks: {
+    initialize: () => ({ text: '' }),
+    feed: ({ state, params, delta }) => ({ state: { text: state.text + delta },
+      result: { ok: state.text.includes(params.token), ranges: [], captures: {} } }),
+    finalize: ({ state }) => ({ state, result: { ok: false, ranges: [], captures: {} } }),
+    reset: () => ({ text: '' }),
+  },
+})
+
+// Worker 通路：源码字符串，进 Worker 的 vm 重新编译。有隔离和超时，没有闭包。
+registry.register({
+  plugin: 'my-plugin', ref: 'my:counter-worker', revision: 1, on: ['output.delta'],
+  paramsSchema: {}, stateSchema: {}, resultSchema: {},
+  workerCallbacks: {
+    initialize: '() => null',
+    feed: '({ delta }) => ({ state: null, result: { ok: delta.includes("MARK"), ranges: [], captures: {} } })',
+    finalize: '({ state }) => ({ state, result: { ok: false, ranges: [], captures: {} } })',
+    reset: '() => null',
+  },
+})
+```
+
+两条通路的差别只有「回调在哪里跑」，契约完全一样：
+
+- **二选一**：同一份注册只能给 `hostCallbacks` 或 `workerCallbacks`。两条都给、两条都不给都报 `detector-callbacks-path-required`。
+- **宿主回调必须是同步函数**：异步回调没法在当前这一趟匹配里返回结果，注册时就会被拒绝。
+- **返回值同样过 JSON 与 schema 校验**：宿主通路不因为「反正没跨进程」就放宽。`state` 超预算、`result` 形状不对，报的错与 Worker 通路一致。
+- **宿主没有 Worker 的超时与隔离**：在 `feed` 里写死循环会把调用方卡住，注册者自己负责。反过来，需要防住不可信代码时用 `workerCallbacks`。
+
+分流与取舍：
+
+- 非检测器规则（含不受控正则）**始终进 Worker**，不会因为旁边挂了宿主检测器就搬到主线程。
+- 只挂宿主检测器、规则里也没有别的东西时，根本不起 Worker。
+- 两条通路各自排序、各自执行。同一个 `exclusiveGroup` 可能在两边都判出结果，最终由同一份全局顺序（scope → priority → sourceId → id）决出唯一的赢家，落败一方的事件丢弃。落败一方的回调已经执行过，它自己的状态记账不回滚——这是两条通路分开执行的代价，不影响本趟输出。
 
 ## 缓存与环境职责
 

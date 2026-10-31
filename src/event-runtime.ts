@@ -548,8 +548,10 @@ export function createEventRuntime({ registry, catalog = { names: new Set(), sha
         || !bindingCurrent(item)) {
         return { item, skip: 'reminder-source-changed' }
       }
-      if (rule.judge && (item.judge?.revision !== rule.judge.revision || detectors.get(rule.judge.ref) !== item.judge)) {
-        return { item, skip: 'reminder-judge-unavailable' }
+      // 内联判定器（code）随规则走，不在注册表里，也就没有「被撤下」这回事。
+      if (rule.judge && !('code' in rule.judge)) {
+        const held = detectors.get(rule.judge.ref)
+        if (!held || held.revision !== rule.judge.revision || item.judge !== held) return { item, skip: 'reminder-judge-unavailable' }
       }
       return { item }
     })
@@ -816,7 +818,8 @@ export function createEventRuntime({ registry, catalog = { names: new Set(), sha
           && !loopBlocked(event, item.value.sourceId, rule.id, rule.action.deny ? 'deny-tool' : 'remind'))
           .map(rule => ({ rule, source: item.value, token: item.token, policy: epoch(event.sessionId, item.value.sourceId, rule.id),
             nativeEvent: rule.stage === 'session.event' ? customEvents.nativeName(rule.event.eventType ?? '') : undefined,
-            judge: rule.judge ? detectors.get(rule.judge.ref) : undefined,
+            // 内联判定器带上源码，注册表判定器按 ref 取；两者下游都按 Detector/InlineJudge 处理。
+            judge: rule.judge ? ('code' in rule.judge ? { code: rule.judge.code } : detectors.get(rule.judge.ref)) : undefined,
             window: rule.action.delivery.model.once === 'window' || rule.action.delivery.model.shared?.reset === 'window'
               ? localWindow('timeWindow' in rule.event ? rule.event.timeWindow : undefined, event.clock?.at) : undefined })))
         .sort((a, b) => b.rule.priority - a.rule.priority || a.source.sourceId.localeCompare(b.source.sourceId) || a.rule.id.localeCompare(b.rule.id))
@@ -1028,7 +1031,7 @@ export function createEventRuntime({ registry, catalog = { names: new Set(), sha
       if (closed || detectors.has(value.ref)) throw new Error('reminder-detector-unavailable')
       detectors.set(value.ref, value)
       return async () => { if (detectors.get(value.ref) !== value) return; detectors.delete(value.ref)
-        const affected = [...running.values()].filter(run => run.items.some(item => item.rule.judge?.ref === value.ref))
+        const affected = [...running.values()].filter(run => run.items.some(item => item.rule.judge !== undefined && !('code' in item.rule.judge) && item.rule.judge.ref === value.ref))
         for (const run of affected) run.controller.abort(new Error('reminder-detector-disposed'))
         await Promise.allSettled(affected.map(run => run.task)) }
     },

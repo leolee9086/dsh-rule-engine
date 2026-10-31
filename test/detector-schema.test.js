@@ -9,11 +9,11 @@ test('cold concurrent detector workers preserve incremental state within the def
   const specification = { plugin: 'cold-test', ref: 'test:letters', revision: 1, on: ['output.delta'],
     paramsSchema: { type: 'object', properties: { token: { type: 'string' } }, required: ['token'], additionalProperties: false },
     stateSchema: { type: 'object', properties: { text: { type: 'string' } }, required: ['text'], additionalProperties: false },
-    resultSchema: {}, callbacks: {
-      initialize() { return { text: '' } },
-      feed({ state, params, delta }) { state.text += delta; return { state, result: { ok: state.text.includes(params.token), ranges: [], captures: {}, facts: { text: state.text } } } },
-      finalize({ state }) { return { state, result: { ok: false, ranges: [], captures: {} } } },
-      reset() { return { text: '' } },
+    resultSchema: {}, workerCallbacks: {
+      initialize: '() => ({ text: "" })',
+      feed: '({ state, params, delta }) => { state.text += delta; return { state, result: { ok: state.text.includes(params.token), ranges: [], captures: {}, facts: { text: state.text } } } }',
+      finalize: '({ state }) => ({ state, result: { ok: false, ranges: [], captures: {} } })',
+      reset: '() => ({ text: "" })',
     } }
   const rule = normalizeRuleV2({ schemaVersion: 2, sourceId: 'cold-test', id: 'letters', revision: 1, on: ['output.delta'],
     select: { view: 'original', roles: ['assistant'], blockTypes: ['text'] },

@@ -9,9 +9,17 @@ import type { RecipientFacts, RecipientIdentity } from './recipient-scope.js'
 import { TextSamples, type CountLimitValues } from './count-condition.js'
 import type { DenialVerdict, PreExecution, UnfinishedCode } from './execution-tickets.js'
 
-export const Detector = z.object({ ref: z.string().min(1), revision: z.number().int().positive(),
-  module: z.string().url().refine(value => new URL(value).protocol === 'file:', 'detector module must be a local file URL'),
-  exportName: z.string().min(1).default('judge') }).strict()
+/**
+ * 判定器/分析器的声明：要么指向外部模块（`module` 必须是本地文件 URL），
+ * 要么直接带源码（`code`）。两者都不需要改引擎，`code` 还不需要落文件。
+ */
+export const Detector = z.union([
+  z.object({ ref: z.string().min(1), revision: z.number().int().positive(),
+    module: z.string().url().refine(value => new URL(value).protocol === 'file:', 'detector module must be a local file URL'),
+    exportName: z.string().min(1).default('judge') }).strict(),
+  z.object({ ref: z.string().min(1), revision: z.number().int().positive(),
+    code: z.string().min(1).max(65536), exportName: z.string().min(1).default('judge') }).strict(),
+])
 const Clock = z.object({ at: z.number(), timeZone: z.string().optional() })
 /** Where an event came from; loop prevention turns on telling a delivery from a human turn. */
 const Origin = z.enum(['human', 'tool', 'reminder', 'recovery', 'background'])
@@ -107,6 +115,10 @@ export type EventValue = z.infer<typeof Event>
 export type SourceValue = z.infer<typeof Source>
 export type RuleValue = z.infer<typeof EventRule>
 export type DetectorValue = z.infer<typeof Detector>
+/** 内联判定器：源码随规则走，不经过注册表，能力与状态都从 ctx 取。 */
+export interface InlineJudgeValue { code: string }
+/** 判定器要么来自注册表（DetectorValue），要么是规则自带的源码（InlineJudgeValue）。 */
+export type JudgeValue = DetectorValue | InlineJudgeValue
 export type CompiledRule = ScheduledAction
 export type Rejection = z.infer<typeof CapacityWire>['rejections'][number]
 export interface RegisteredSource {
@@ -121,7 +133,7 @@ export interface WorkItem {
   token: string
   rule: CompiledRule
   policy: CandidateValue['policy']
-  judge?: DetectorValue
+  judge?: JudgeValue
   window?: CandidateValue['window']
   /** Re-evaluate a choice as an exclusivity barrier without delivering this handed rule again. */
   handed?: boolean
@@ -159,7 +171,7 @@ export interface Run {
 export interface BatchRuleInput {
   key: string
   condition: CompiledRule['condition']
-  judge?: DetectorValue
+  judge?: JudgeValue
   params?: z.infer<ReturnType<typeof z.json>>
   timeoutMs?: number
   exclusiveGroup?: string
@@ -167,7 +179,7 @@ export interface BatchRuleInput {
 }
 /** Compiled conditions retain count limits at the worker validation boundary. */
 export type Work = { analysis: { analyzer: DetectorValue; event: EventValue; maxBytes: number } }
-  | { reminder: { condition: CompiledRule['condition']; event: EventValue; maxBytes: number; countLimits: CountLimitValues; judge?: DetectorValue; params?: z.infer<ReturnType<typeof z.json>> } }
+  | { reminder: { condition: CompiledRule['condition']; event: EventValue; maxBytes: number; countLimits: CountLimitValues; judge?: JudgeValue; params?: z.infer<ReturnType<typeof z.json>> } }
   /**
    * 一次往返算完多条规则。逐条往返的固定开销按规则数线性增长，
    * 而单条规则真正的匹配只有几十微秒，所以往返次数本身才是瓶颈。
